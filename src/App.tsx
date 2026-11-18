@@ -36,11 +36,103 @@ const NAV_ITEMS: Array<{
   { id: 'packages', label: 'Packages', icon: Package },
 ];
 
+const LS_LEADS_KEY = 'stepstone_leads_v1';
+const LS_PACKAGES_KEY = 'stepstone_packages_v1';
+
+const FALLBACK_PACKAGES: AgencyPackagesConfig = {
+  deliveryTimeline: 'Approximately 7 days',
+  authorizePaymentSplit: false,
+  tiers: [
+    {
+      id: 'basic',
+      name: 'Basic',
+      priceNaira: 55000,
+      pagesLabel: '1 page',
+      targetAudience: 'Starter presence for emerging agencies',
+      features: [
+        '1-page responsive layout',
+        'WhatsApp direct contact button',
+        'Business contact details & location',
+        'Mobile-friendly design',
+        'Google Business Profile setup',
+      ],
+    },
+    {
+      id: 'standard',
+      name: 'Standard',
+      priceNaira: 85000,
+      pagesLabel: '5 pages',
+      targetAudience: 'Recommended for established real estate firms',
+      features: [
+        '5 structured pages (Home, About, Estates, Listings, Contact)',
+        'Property showcase gallery',
+        'Dedicated buyer inquiry form',
+        'Google Maps office & site integration',
+        'WhatsApp auto-reply greeting setup',
+        'Inquiries automatically logged in Google Sheets',
+      ],
+    },
+    {
+      id: 'premium',
+      name: 'Premium',
+      priceNaira: 120000,
+      pagesLabel: '8 pages',
+      targetAudience: 'Full-scale developers & multi-estate portfolios',
+      features: [
+        '8 pages with estate & investment sections',
+        'Interactive property search and filters',
+        'Online inspection / viewing booking flow',
+        'Custom features tailored to firm workflow',
+        'One month of free property listing updates',
+      ],
+    },
+  ],
+};
+
+function readLocalJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocalJson(key: string, value: unknown): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+async function parseApiResponse<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  let data: Record<string, unknown> | null = null;
+  try {
+    data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new Error(
+      `Server returned a non-JSON response (HTTP ${res.status}): ${text.slice(0, 120)}`
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      (typeof data?.error === 'string' && data.error) || `Request failed (HTTP ${res.status})`
+    );
+  }
+  return data as T;
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('discovery');
   const [selectedState, setSelectedState] = useState<LocationSelection>('FCT (Abuja)');
-  const [leads, setLeads] = useState<LeadRecord[]>([]);
-  const [packages, setPackages] = useState<AgencyPackagesConfig | null>(null);
+  const [leads, setLeads] = useState<LeadRecord[]>(() =>
+    readLocalJson<LeadRecord[]>(LS_LEADS_KEY, [])
+  );
+  const [packages, setPackages] = useState<AgencyPackagesConfig | null>(() =>
+    readLocalJson<AgencyPackagesConfig | null>(LS_PACKAGES_KEY, null)
+  );
   const [selectedLeadId, setSelectedLeadId] = useState<string | null>(null);
   const [lastDiscovery, setLastDiscovery] = useState<DiscoveryResponse | null>(null);
 
@@ -49,14 +141,34 @@ export default function App() {
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
+  useEffect(() => {
+    writeLocalJson(LS_LEADS_KEY, leads);
+  }, [leads]);
+
+  useEffect(() => {
+    if (packages) {
+      writeLocalJson(LS_PACKAGES_KEY, packages);
+    }
+  }, [packages]);
+
   const fetchInitialState = useCallback(async () => {
     try {
       const res = await fetch('/api/state');
-      if (!res.ok) throw new Error('Failed to load workspace state.');
-      const data = await res.json();
-      setLeads(data.leads ?? []);
-      setPackages(data.packages ?? null);
+      const data = await parseApiResponse<{
+        leads?: LeadRecord[];
+        packages?: AgencyPackagesConfig;
+      }>(res);
+      const serverLeads = Array.isArray(data.leads) ? data.leads : [];
+      if (serverLeads.length > 0) {
+        setLeads((prev) => {
+          const seen = new Set(serverLeads.map((l) => l.id));
+          const merged = [...serverLeads, ...prev.filter((l) => !seen.has(l.id))];
+          return merged;
+        });
+      }
+      setPackages((prev) => prev ?? data.packages ?? FALLBACK_PACKAGES);
     } catch (err) {
+      setPackages((prev) => prev ?? FALLBACK_PACKAGES);
       setErrorBanner(err instanceof Error ? err.message : 'Unable to connect to server.');
     } finally {
       setLoadingState(false);
@@ -80,13 +192,10 @@ export default function App() {
           selectedState,
           customKeywords,
           maxResults,
+          existingBusinessNames: leads.map((l) => l.business_name),
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Business discovery failed.');
-      }
-      const discovery = data as DiscoveryResponse;
+      const discovery = await parseApiResponse<DiscoveryResponse>(res);
       setLastDiscovery(discovery);
       setLeads((prev) => [...discovery.leads, ...prev]);
       if (discovery.leads.length > 0) {
@@ -109,101 +218,125 @@ export default function App() {
     instagram_url: string;
   }) => {
     setErrorBanner(null);
-    const res = await fetch('/api/leads/inspect-manual', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorBanner(data.error || 'Failed to inspect company.');
-      throw new Error(data.error || 'Failed to inspect company.');
+    try {
+      const res = await fetch('/api/leads/inspect-manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      setLeads((prev) => [data.lead, ...prev]);
+      setSelectedLeadId(data.lead.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to inspect company.';
+      setErrorBanner(msg);
+      throw new Error(msg);
     }
-    setLeads((prev) => [data.lead, ...prev]);
-    setSelectedLeadId(data.lead.id);
   };
 
   const handleReinspectLead = async (id: string, websiteUrl?: string | null) => {
     setErrorBanner(null);
-    const res = await fetch(`/api/leads/${id}/inspect`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ website_url: websiteUrl }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorBanner(data.error || 'Failed to re-inspect website.');
-      return;
+    try {
+      const targetLead = leads.find((l) => l.id === id);
+      const res = await fetch(`/api/leads/${id}/inspect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ website_url: websiteUrl, lead: targetLead }),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to re-inspect website.');
     }
-    setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
   };
 
   const handleGenerateOutreach = async (id: string) => {
     setErrorBanner(null);
-    const res = await fetch(`/api/leads/${id}/outreach`, {
-      method: 'POST',
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorBanner(data.error || 'Failed to generate outreach.');
-      return;
+    try {
+      const targetLead = leads.find((l) => l.id === id);
+      const res = await fetch(`/api/leads/${id}/outreach`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead: targetLead, packages }),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to generate outreach.');
     }
-    setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
   };
 
   const handleUpdateLifecycle = async (id: string, lifecycle: LeadLifecycleStatus) => {
     setErrorBanner(null);
-    const res = await fetch(`/api/leads/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lead_lifecycle: lifecycle }),
-    });
-    const data = await res.json();
-    if (res.ok && data.lead) {
-      setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+    const targetLead = leads.find((l) => l.id === id);
+    setLeads((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, lead_lifecycle: lifecycle } : l))
+    );
+    try {
+      const res = await fetch(`/api/leads/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead_lifecycle: lifecycle, lead: targetLead }),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      if (data.lead) {
+        setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update lead stage.');
     }
   };
 
   const handleDeleteLead = async (id: string) => {
     setErrorBanner(null);
-    const res = await fetch(`/api/leads/${id}`, { method: 'DELETE' });
-    if (res.ok) {
-      setLeads((prev) => prev.filter((l) => l.id !== id));
-      if (selectedLeadId === id) setSelectedLeadId(null);
+    setLeads((prev) => prev.filter((l) => l.id !== id));
+    if (selectedLeadId === id) setSelectedLeadId(null);
+    try {
+      await fetch(`/api/leads/${id}`, { method: 'DELETE' });
+    } catch {
+      // Local removal already applied
     }
   };
 
   const handleGenerateReply = async (leadId: string | null, prospectMessage: string) => {
     setErrorBanner(null);
-    const res = await fetch('/api/reply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ leadId, prospectMessage }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorBanner(data.error || 'Reply generation failed.');
-      throw new Error(data.error || 'Reply generation failed.');
+    try {
+      const targetLead = leadId ? leads.find((l) => l.id === leadId) ?? null : null;
+      const res = await fetch('/api/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leadId, prospectMessage, lead: targetLead, packages }),
+      });
+      const data = await parseApiResponse<{
+        reply: string;
+        shouldMarkClosed: boolean;
+        lead?: LeadRecord | null;
+      }>(res);
+      if (data.lead) {
+        setLeads((prev) => prev.map((l) => (l.id === data.lead!.id ? data.lead! : l)));
+      }
+      return { reply: data.reply, shouldMarkClosed: data.shouldMarkClosed };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Reply generation failed.';
+      setErrorBanner(msg);
+      throw new Error(msg);
     }
-    if (data.lead) {
-      setLeads((prev) => prev.map((l) => (l.id === data.lead.id ? data.lead : l)));
-    }
-    return { reply: data.reply, shouldMarkClosed: data.shouldMarkClosed };
   };
 
   const handleSavePackages = async (next: AgencyPackagesConfig) => {
     setErrorBanner(null);
-    const res = await fetch('/api/packages', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(next),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setErrorBanner(data.error || 'Failed to save packages.');
-      return;
+    setPackages(next);
+    try {
+      const res = await fetch('/api/packages', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      });
+      const data = await parseApiResponse<{ packages: AgencyPackagesConfig }>(res);
+      setPackages(data.packages);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to save packages to server.');
     }
-    setPackages(data.packages);
   };
 
   const qualifiedCount = leads.filter((l) => !l.skip && l.opportunity_score >= 3).length;

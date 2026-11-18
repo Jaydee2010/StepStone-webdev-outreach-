@@ -1,8 +1,8 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import type {
   AgencyPackagesConfig,
-  ChatMessage,
   LeadRecord,
   SearchLog,
 } from '../src/types/stepstone.ts';
@@ -11,42 +11,12 @@ export interface StepstoneDatabase {
   leads: LeadRecord[];
   packages: AgencyPackagesConfig;
   searches: SearchLog[];
-  chatMessages: ChatMessage[];
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'stepstone-db.json');
+const LOCAL_DATA_DIR = path.resolve(process.cwd(), 'data');
+const TMP_DATA_DIR = path.join(os.tmpdir(), 'stepstone-data');
 
-export const INITIAL_ASSISTANT_MESSAGE: ChatMessage = {
-  id: 'msg-welcome-identity',
-  role: 'assistant',
-  timestamp: new Date().toISOString(),
-  content: `Welcome, Jaydee. I am the **Stepstone Web Agency Brain** — the central business discovery, website intelligence, and outreach system for **Stepstone Web Agency** in Abuja, Nigeria.
-
-My mandate is to help you locate genuine Nigerian real estate companies (developers, estate firms, property investment and management companies), verify their real online presence with evidence, qualify them accurately, and prepare honest, high-converting outreach.
-
-### Functions I Can Carry Out
-
-1. **State-Locked Business Discovery**
-   Search real estate companies, property developers, estate development firms, and property management companies strictly within your selected Nigerian state (defaulting to **FCT (Abuja)** across all 36 states + FCT, or **All Nigerian States** only when you explicitly choose it). I never switch or expand to neighboring states automatically.
-
-2. **Website Discovery & Live Inspection**
-   Investigate each company's official website, follow HTTP redirects safely to catch Instagram/Facebook/WhatsApp-only redirects, inspect homepage availability, mobile viewport readiness, navigation, contact details, inquiry forms, and classify each prospect (\`no_website\`, \`instagram_only\`, \`social_only\`, \`broken_website\`, \`weak_website\`, \`good_website\`, or \`unknown\`).
-
-3. **Opportunity Qualification (1–5 Scoring)**
-   Score every discovered firm from **1 to 5** based on verified evidence—prioritizing established developers and real estate companies with missing, social-only, broken, or weak websites. Prospects scoring 1 or 2 are automatically marked \`skip\`.
-
-4. **Mode B Outreach & Follow-Up Generation**
-   For qualified prospects (score 3–5), draft a friendly Nigerian business English **first WhatsApp message** (under 60 words, max 1 emoji, no pricing), **Instagram DM** (max 40 words), **Day 2 follow-up** (<40 words), and **Day 5 polite closing follow-up** (<40 words) referencing a verified observation and offering a free homepage preview.
-
-5. **Prospect Reply Handling**
-   Generate concise, honest replies to prospect questions—explaining how websites drive direct inquiries, presenting your **Basic (₦55,000)**, **Standard (₦85,000)**, and **Premium (₦120,000)** packages, handling price objections without unauthorized discounting, and closing politely when a prospect declines.
-
-6. **Concept Homepage Preview & Image Briefs**
-   Build a detailed concept homepage image-generation brief (and interactive preview mockup) tailored to the prospect's real company name, Nigerian property imagery, property showcase, and WhatsApp CTA.
-
-Select a target state in the top bar and click **Run Discovery**, or ask me anything right here to plan prospecting, review leads, or handle a prospect's reply.`,
-};
+let memoryDb: StepstoneDatabase | null = null;
 
 export const DEFAULT_PACKAGES: AgencyPackagesConfig = {
   deliveryTimeline: 'Approximately 7 days',
@@ -98,53 +68,62 @@ export const DEFAULT_PACKAGES: AgencyPackagesConfig = {
   ],
 };
 
-function ensureDbExists(): StepstoneDatabase {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(DB_PATH)) {
-    const initial: StepstoneDatabase = {
-      leads: [],
-      packages: DEFAULT_PACKAGES,
-      searches: [],
-      chatMessages: [INITIAL_ASSISTANT_MESSAGE],
-    };
-    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2), 'utf-8');
-    return initial;
-  }
-  try {
-    const raw = fs.readFileSync(DB_PATH, 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<StepstoneDatabase>;
-    return {
-      leads: Array.isArray(parsed.leads) ? parsed.leads : [],
-      packages: parsed.packages ?? DEFAULT_PACKAGES,
-      searches: Array.isArray(parsed.searches) ? parsed.searches : [],
-      chatMessages:
-        Array.isArray(parsed.chatMessages) && parsed.chatMessages.length > 0
-          ? parsed.chatMessages
-          : [INITIAL_ASSISTANT_MESSAGE],
-    };
-  } catch {
-    const fallback: StepstoneDatabase = {
-      leads: [],
-      packages: DEFAULT_PACKAGES,
-      searches: [],
-      chatMessages: [INITIAL_ASSISTANT_MESSAGE],
-    };
-    fs.writeFileSync(DB_PATH, JSON.stringify(fallback, null, 2), 'utf-8');
-    return fallback;
-  }
+function getDbFilePath(): string {
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  const dir = isServerless ? TMP_DATA_DIR : LOCAL_DATA_DIR;
+  return path.join(dir, 'stepstone-db.json');
+}
+
+function createInitialDb(): StepstoneDatabase {
+  return {
+    leads: [],
+    packages: DEFAULT_PACKAGES,
+    searches: [],
+  };
 }
 
 export function readDb(): StepstoneDatabase {
-  return ensureDbExists();
+  const dbPath = getDbFilePath();
+  const dir = path.dirname(dbPath);
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(dbPath)) {
+      const initial = memoryDb ?? createInitialDb();
+      fs.writeFileSync(dbPath, JSON.stringify(initial, null, 2), 'utf-8');
+      memoryDb = initial;
+      return initial;
+    }
+    const raw = fs.readFileSync(dbPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<StepstoneDatabase>;
+    const db: StepstoneDatabase = {
+      leads: Array.isArray(parsed.leads) ? parsed.leads : [],
+      packages: parsed.packages ?? DEFAULT_PACKAGES,
+      searches: Array.isArray(parsed.searches) ? parsed.searches : [],
+    };
+    memoryDb = db;
+    return db;
+  } catch {
+    if (!memoryDb) {
+      memoryDb = createInitialDb();
+    }
+    return memoryDb;
+  }
 }
 
 export function writeDb(db: StepstoneDatabase): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  memoryDb = db;
+  const dbPath = getDbFilePath();
+  const dir = path.dirname(dbPath);
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf-8');
+  } catch {
+    // Fallback cleanly to in-memory store if filesystem is read-only
   }
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf-8');
 }
 
 export function normalizeCompanyName(name: string): string {
