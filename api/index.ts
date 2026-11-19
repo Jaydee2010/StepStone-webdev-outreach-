@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { createApiApp } from './app.ts';
+import { createApiApp } from '../server/app.ts';
 
 const app = createApiApp();
 
