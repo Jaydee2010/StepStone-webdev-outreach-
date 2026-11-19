@@ -28,22 +28,39 @@ function isValidLocation(loc: string): boolean {
 }
 
 function extractApiError(err: unknown): { status: number; message: string } {
-  const msg = err instanceof Error ? err.message : 'Internal server error';
-  if (/API_KEY_INVALID|PERMISSION_DENIED/i.test(msg)) {
+  const rawMsg = err instanceof Error ? err.message : String(err ?? 'Internal server error');
+  if (/API_KEY_INVALID|PERMISSION_DENIED/i.test(rawMsg)) {
     return {
       status: 403,
       message:
         'Gemini API key is missing or invalid. Please check your GEMINI_API_KEY environment variable or Settings > Secrets panel.',
     };
   }
-  if (/RESOURCE_EXHAUSTED|429/i.test(msg)) {
-    const cleanDetail = msg.replace(/\s+/g, ' ').slice(0, 260);
+  if (/RESOURCE_EXHAUSTED|429/i.test(rawMsg)) {
+    let readable = rawMsg;
+    try {
+      const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]) as {
+          error?: { message?: string };
+        };
+        if (parsed?.error?.message) {
+          readable = parsed.error.message;
+        }
+      }
+    } catch {
+      // Keep raw message if not JSON
+    }
+    const isZeroLimit = /limit:\s*0\b/i.test(rawMsg);
+    const hint = isZeroLimit
+      ? 'Google returned limit: 0 for your current API key tier on this model/Search Grounding. Link a billing account to your project in Google AI Studio (aistudio.google.com) to unlock paid-tier quota.'
+      : 'Wait ~60 seconds for per-minute limits to reset, or upgrade your project to Pay-as-you-go billing in Google AI Studio (aistudio.google.com).';
     return {
       status: 429,
-      message: `Gemini API quota/rate limit reached (${cleanDetail}). If you are using a free-tier API key, check quota or select a billing-enabled key.`,
+      message: `Gemini API 429 Quota Error: ${readable.replace(/\s+/g, ' ').slice(0, 220)} — ${hint}`,
     };
   }
-  return { status: 500, message: msg };
+  return { status: 500, message: rawMsg };
 }
 
 export function createApiRouter(): express.Router {

@@ -12,7 +12,7 @@ function getAiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      'GEMINI_API_KEY is not configured. Please check the Settings > Secrets panel.'
+      'GEMINI_API_KEY is not configured. Please check your GEMINI_API_KEY environment variable or Settings > Secrets panel.'
     );
   }
   return new GoogleGenAI({
@@ -29,7 +29,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+function isHardQuotaZeroOrDaily(msg: string): boolean {
+  return /limit:\s*0\b|"limit"\s*:\s*0\b|PerDay|GenerateRequestsPerDay|billing/i.test(msg);
+}
+
+async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 1): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -37,17 +41,62 @@ async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise
     } catch (err) {
       lastError = err;
       const msg = err instanceof Error ? err.message : String(err);
+      if (isHardQuotaZeroOrDaily(msg)) {
+        throw err;
+      }
       const isRetryable = /429|RESOURCE_EXHAUSTED|503|UNAVAILABLE|overloaded|try again/i.test(
         msg
       );
       if (!isRetryable || attempt === maxRetries) {
         throw err;
       }
-      const delayMs = 2000 * Math.pow(2, attempt);
-      await sleep(delayMs);
+      await sleep(2500 * (attempt + 1));
     }
   }
   throw lastError;
+}
+
+/**
+ * Calls gemini-4-hydrogen first; on 429/RESOURCE_EXHAUSTED, falls back to gemini-3.1-flash-lite
+ * which offers higher RPM/TPM headroom for lightweight JSON classification and copy tasks.
+ */
+async function generateWithFallback(
+  ai: GoogleGenAI,
+  params: {
+    contents: string;
+    responseMimeType?: string;
+    responseSchema?: Record<string, unknown>;
+    tools?: Array<Record<string, unknown>>;
+    primaryThinking?: ThinkingLevel;
+  }
+) {
+  const runModel = (model: string, thinkingLevel: ThinkingLevel) =>
+    ai.models.generateContent({
+      model,
+      contents: params.contents,
+      config: {
+        ...(params.tools ? { tools: params.tools } : {}),
+        thinkingConfig: { thinkingLevel },
+        ...(params.responseMimeType ? { responseMimeType: params.responseMimeType } : {}),
+        ...(params.responseSchema ? { responseSchema: params.responseSchema } : {}),
+      },
+    });
+
+  try {
+    return await withGeminiRetry(
+      () => runModel('gemini-4-hydrogen', params.primaryThinking ?? ThinkingLevel.LOW),
+      1
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/429|RESOURCE_EXHAUSTED/i.test(msg)) {
+      return await withGeminiRetry(
+        () => runModel('gemini-3.1-flash-lite', ThinkingLevel.MINIMAL),
+        0
+      );
+    }
+    throw err;
+  }
 }
 
 function extractGroundingUrls(response: unknown): string[] {
@@ -134,68 +183,50 @@ export async function discoverBusinessesWithSearch(params: {
       : [
           `Real estate companies in ${isAllStates ? 'Nigeria' : params.selectedState}`,
           `Property developers in ${isAllStates ? 'Nigeria' : params.selectedState}`,
-          `Estate development companies in ${isAllStates ? 'Nigeria' : params.selectedState}`,
-          `Property management companies in ${isAllStates ? 'Nigeria' : params.selectedState}`,
+          `Estate development and property management companies in ${isAllStates ? 'Nigeria' : params.selectedState}`,
         ];
 
-  const excludeSlice = params.existingBusinessNames.slice(0, 60);
-  const targetCount = Math.min(Math.max(params.maxResults ?? 5, 3), 10);
+  const excludeSlice = params.existingBusinessNames.slice(0, 40);
+  const targetCount = Math.min(Math.max(params.maxResults ?? 4, 3), 8);
 
   const locationConstraint = isAllStates
-    ? `Target location: All Nigerian States. For every company, accurately identify and label its actual Nigerian state.`
-    : `Target location: ${params.selectedState}, Nigeria ONLY.
-STRICT LOCATION RULES:
-- Search ONLY inside ${params.selectedState}.
-- NEVER include businesses headquartered or primarily operating in neighboring or other Nigerian states.
-- NEVER automatically switch to another state if results are limited.
-- If fewer than ${targetCount} genuine companies are verified in ${params.selectedState}, return only what was genuinely verified and explain honestly in "honest_note".`;
+    ? `Target location: All Nigerian States. Label every company with its actual Nigerian state.`
+    : `Target location: ${params.selectedState}, Nigeria ONLY. Never include businesses from other states or expand to neighboring states. If fewer than ${targetCount} verified firms are found, return only what is verified and note it in "honest_note".`;
 
-  const prompt = `You are the business discovery and website research engine for Stepstone Web Agency.
-Search Google using multiple real estate search angles:
+  const prompt = `Search Google for established Nigerian real estate firms using these angles:
 ${keywordsUsed.map((k) => `- "${k}"`).join('\n')}
 
 ${locationConstraint}
 
-Target market priority:
-- Prioritize established real estate companies, property developers, estate development companies, property investment firms, and property management firms over individual property agents.
-- For each discovered company, also check during this search whether it has an official website, Instagram profile, Facebook page, or Google Business Profile.
-- Avoid these already-discovered businesses: ${excludeSlice.length > 0 ? excludeSlice.join('; ') : 'None yet'}.
+Prioritize established real estate companies, property developers, estate development firms, and property management firms over individual agents.
+Exclude already stored firms: ${excludeSlice.length > 0 ? excludeSlice.join('; ') : 'None'}.
+For each firm, check for an official website, Instagram profile, Facebook page, or Google Business Profile. Never invent data; set unverified fields to null. Put directory URLs (Nigeria Property Centre, BusinessList, Finelib) in source_urls and leave website_url as null if no independent official domain is verified.
 
-DATA INTEGRITY RULES (CRITICAL):
-- NEVER invent business names, phone numbers, addresses, websites, Instagram handles, or listings.
-- Set any unverified field to null (phone, website_url, instagram_url, facebook_url, google_business_profile_url).
-- Distinguish official company websites from business directories (e.g., Nigeria Property Centre, BusinessList, Finelib, VConnect). If only a directory page was found, put the directory URL in source_urls and leave website_url as null!
-
-Return ONLY a valid JSON object with this exact shape:
+Return ONLY valid JSON:
 {
-  "honest_note": "Concise factual summary of what searches yielded in the selected state.",
+  "honest_note": "Brief factual summary of search results in ${params.selectedState}.",
   "companies": [
     {
       "business_name": "Exact company name",
-      "business_category": "e.g. Property Developer | Estate Development Company | Real Estate Company | Property Management Firm",
+      "business_category": "Property Developer | Estate Development Company | Real Estate Company | Property Management Firm",
       "state": "${isAllStates ? 'Actual Nigerian State' : params.selectedState}",
-      "city": "City or district (e.g. Maitama, Wuse II, Gwarinpa, Lekki, GRA)",
+      "city": "City or district",
       "phone": "+234... or null",
       "website_url": "https://... or null",
       "instagram_url": "https://instagram.com/... or null",
       "facebook_url": "https://facebook.com/... or null",
       "google_business_profile_url": "https://... or null",
       "source_urls": ["https://..."],
-      "discovery_notes": "Brief factual evidence of active company operations, listings, or website/social presence found."
+      "discovery_notes": "Brief factual evidence found."
     }
   ]
 }`;
 
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
-    })
-  );
+  const response = await generateWithFallback(ai, {
+    contents: prompt,
+    tools: [{ googleSearch: {} }],
+    primaryThinking: ThinkingLevel.LOW,
+  });
 
   const groundingUrls = extractGroundingUrls(response);
   const parsed = parseJsonFromText<{
@@ -280,12 +311,7 @@ export async function lookupWebsiteAndSocials(company: {
 Company: "${company.business_name}"
 Location: ${company.city ? `${company.city}, ` : ''}${company.state}, Nigeria
 
-Search using:
-1. "${company.business_name}"
-2. "${company.business_name}" ${company.state}
-3. "${company.business_name}" instagram OR website
-
-Distinguish genuine official company domains from directory listings (Nigeria Property Centre, BusinessList, Finelib, LinkedIn, etc.) and unrelated companies with similar names.
+Distinguish genuine official company domains from directory listings (Nigeria Property Centre, BusinessList, Finelib, LinkedIn) and unrelated companies.
 Return ONLY valid JSON:
 {
   "website_url": "official domain URL or null",
@@ -295,16 +321,11 @@ Return ONLY valid JSON:
   "source_urls": ["https://..."]
 }`;
 
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
-    })
-  );
+  const response = await generateWithFallback(ai, {
+    contents: prompt,
+    tools: [{ googleSearch: {} }],
+    primaryThinking: ThinkingLevel.LOW,
+  });
 
   const groundingUrls = extractGroundingUrls(response);
   const parsed = parseJsonFromText<{
@@ -434,16 +455,11 @@ function buildLeadRecord(params: {
   };
 }
 
-/**
- * Batch-inspects HTTP endpoints on the server (0 Gemini quota) and classifies/scores
- * all discovered candidates in ONE single Gemini call to avoid RPM rate-limit bursts.
- */
 export async function inspectAndQualifyBatch(
   candidates: RawDiscoveredCompany[]
 ): Promise<LeadRecord[]> {
   if (candidates.length === 0) return [];
 
-  // Run pure Node.js HTTP checks in parallel (zero Gemini calls)
   const inspected = await Promise.all(
     candidates.map(async (raw) => {
       let websiteUrl = raw.website_url;
@@ -477,7 +493,8 @@ export async function inspectAndQualifyBatch(
     facebook_url: item.facebookUrl,
     google_business_profile_url: item.raw.google_business_profile_url,
     discovery_notes: item.raw.discovery_notes,
-    http_inspection_report: item.httpReport ?? 'No independent website URL discovered to inspect via HTTP.',
+    http_inspection_report:
+      item.httpReport ?? 'No independent website URL discovered to inspect via HTTP.',
   }));
 
   const batchPrompt = `Classify the website situation and qualify EACH of these ${inspected.length} Nigerian real estate businesses for Stepstone Web Agency.
@@ -486,57 +503,39 @@ CANDIDATES & LIVE HTTP REPORTS:
 ${JSON.stringify(payloadSummary, null, 2)}
 
 CLASSIFICATION RULES (choose exactly ONE per company):
-- "no_website": No identifiable official website discovered after reasonable research and no primary social presence.
-- "instagram_only": Uses Instagram as primary online presence without an independent website (or website URL redirects to Instagram).
-- "social_only": Identifiable Facebook/WhatsApp/other social presence without a verified independent website.
-- "broken_website": Official website repeatedly failed to load or returned confirmed 404/5xx/DNS failure (NOT a single 403/429 WAF block).
-- "weak_website": Website loads but has significant identifiable design, mobile viewport, contact, inquiry form, or functionality shortcomings.
-- "good_website": Website loads cleanly with working structure, mobile viewport, and professional presence.
-- "unknown": Evidence is insufficient or access was blocked by WAF/bot protection (403/429) so functionality could not be verified.
+- "no_website", "instagram_only", "social_only", "broken_website", "weak_website", "good_website", "unknown".
+- Do NOT mark broken_website on a single 403/429 WAF block.
+- Score 1-5: 5=Excellent (no/social/broken site + active firm), 4=Strong (weak site or clear gap), 3=Potential, 2=Weak, 1=Poor. If score <= 2, skip MUST be true.`;
 
-QUALIFICATION SCORING RULES (1 to 5):
-- 5 = Excellent prospect (established company/developer with no_website, instagram_only, social_only, or broken_website + active evidence).
-- 4 = Strong prospect (real estate firm/developer with clear website opportunity or weak_website).
-- 3 = Potential prospect (moderate opportunity or smaller firm with weak/missing site).
-- 2 = Weak prospect (good_website with minor improvements, or unverified/individual agent).
-- 1 = Poor prospect (strong existing website, inactive, or unknown status without clear need).
-- If score is 1 or 2, skip MUST be true. Otherwise skip MUST be false.
-- Do NOT invent inspection facts not present in the HTTP report or discovery notes.`;
-
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: batchPrompt,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              index: { type: Type.INTEGER },
-              website_status: { type: Type.STRING },
-              inspection_evidence: { type: Type.STRING },
-              confidence: { type: Type.STRING },
-              opportunity_score: { type: Type.INTEGER },
-              qualification_reason: { type: Type.STRING },
-              skip: { type: Type.BOOLEAN },
-            },
-            required: [
-              'index',
-              'website_status',
-              'inspection_evidence',
-              'confidence',
-              'opportunity_score',
-              'qualification_reason',
-              'skip',
-            ],
-          },
+  const response = await generateWithFallback(ai, {
+    contents: batchPrompt,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          index: { type: Type.INTEGER },
+          website_status: { type: Type.STRING },
+          inspection_evidence: { type: Type.STRING },
+          confidence: { type: Type.STRING },
+          opportunity_score: { type: Type.INTEGER },
+          qualification_reason: { type: Type.STRING },
+          skip: { type: Type.BOOLEAN },
         },
+        required: [
+          'index',
+          'website_status',
+          'inspection_evidence',
+          'confidence',
+          'opportunity_score',
+          'qualification_reason',
+          'skip',
+        ],
       },
-    })
-  );
+    },
+    primaryThinking: ThinkingLevel.LOW,
+  });
 
   const qualifications = parseJsonFromText<
     Array<{
@@ -575,7 +574,6 @@ export async function inspectAndQualifyCandidate(
   let lookupNotes = raw.discovery_notes;
   let allSources = [...raw.source_urls];
 
-  // Step 1: If website_url is missing on single manual inspection, run targeted Step 1 Website Discovery
   if (!websiteUrl && allowSearchLookup) {
     try {
       const lookup = await lookupWebsiteAndSocials({
@@ -589,11 +587,10 @@ export async function inspectAndQualifyCandidate(
       lookupNotes = [lookupNotes, lookup.lookup_notes].filter(Boolean).join(' ');
       allSources = Array.from(new Set([...allSources, ...lookup.source_urls]));
     } catch {
-      // Keep original discovery details if secondary lookup fails transiently
+      // Keep original discovery details if secondary lookup fails
     }
   }
 
-  // Step 2 & 3: Real server-side HTTP destination & functionality check
   let httpReport: HttpInspectionReport | null = null;
   if (websiteUrl) {
     httpReport = await inspectWebsiteUrl(websiteUrl);
@@ -623,40 +620,35 @@ COMPANY RECORD:
 LIVE SERVER HTTP INSPECTION REPORT:
 ${httpReport ? JSON.stringify(httpReport, null, 2) : 'No independent website URL was discovered to inspect via HTTP.'}
 
-CLASSIFICATION RULES (choose exactly ONE):
+CLASSIFICATION RULES:
 - "no_website", "instagram_only", "social_only", "broken_website", "weak_website", "good_website", "unknown".
 - If score is 1 or 2, skip MUST be true. Otherwise skip MUST be false.
 - Do NOT invent inspection facts not present in the HTTP report or discovery notes.`;
 
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: qualificationPrompt,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            website_status: { type: Type.STRING },
-            inspection_evidence: { type: Type.STRING },
-            confidence: { type: Type.STRING },
-            opportunity_score: { type: Type.INTEGER },
-            qualification_reason: { type: Type.STRING },
-            skip: { type: Type.BOOLEAN },
-          },
-          required: [
-            'website_status',
-            'inspection_evidence',
-            'confidence',
-            'opportunity_score',
-            'qualification_reason',
-            'skip',
-          ],
-        },
+  const response = await generateWithFallback(ai, {
+    contents: qualificationPrompt,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        website_status: { type: Type.STRING },
+        inspection_evidence: { type: Type.STRING },
+        confidence: { type: Type.STRING },
+        opportunity_score: { type: Type.INTEGER },
+        qualification_reason: { type: Type.STRING },
+        skip: { type: Type.BOOLEAN },
       },
-    })
-  );
+      required: [
+        'website_status',
+        'inspection_evidence',
+        'confidence',
+        'opportunity_score',
+        'qualification_reason',
+        'skip',
+      ],
+    },
+    primaryThinking: ThinkingLevel.LOW,
+  });
 
   const result = parseJsonFromText<{
     website_status?: WebsiteClassification;
@@ -718,62 +710,42 @@ OUR OFFER CONTEXT (do NOT include prices or package lists in first outreach mess
 
 STRICT OUTREACH RULES:
 1. Choose angle from: "no_website", "instagram_only", "social_only", "broken_website", "weak_website". Never claim a problem unless inspection_evidence supports it.
-2. FIRST WHATSAPP MESSAGE:
-   - Strictly UNDER 60 words.
-   - Friendly Nigerian business English (warm, respectful, concise — no slang overload).
-   - Greet by company name.
-   - Mention ONE specific, verified observation from inspection_evidence.
-   - Offer the free homepage preview.
-   - End with ONE easy question.
-   - NO prices or package lists.
-   - Maximum ONE emoji (or zero).
-   - Never pretend to be a customer.
-   - Honest marketing: never promise a specific number of clients, sales, or guaranteed revenue.
-3. INSTAGRAM MESSAGE:
-   - Maximum 40 words. Same verified observation + free preview offer + easy question.
-4. FOLLOW-UP 1 (DAY 2):
-   - Under 40 words. Introduce something useful (e.g., direct inquiry capture alongside Instagram/WhatsApp) or ask a gentle question.
-5. FOLLOW-UP 2 (DAY 5):
-   - Under 40 words. Politely close the conversation and leave the door open without pressure.
-6. PREVIEW BRIEF (PART 10):
-   - Detailed image-generation brief for a concept homepage mockup.
-   - Specify: the exact company name ("${lead.business_name}"), company name as logo text, brand colours (note "neutral architectural slate & warm sand unless official brand colours are provided" if unknown — do not invent branding), suitable Nigerian property image (e.g. modern Abuja/Lagos residential development matching ${lead.state}), professional real estate website layout, clear headline, property showcase section, WhatsApp contact button, both mobile and desktop presentation, appropriate portrait composition, and explicitly marked as a "Concept Homepage Preview" (not an existing website).`;
+2. FIRST WHATSAPP MESSAGE: Strictly UNDER 60 words, friendly Nigerian business English, greet by company name, mention ONE verified observation, offer free homepage preview, end with ONE easy question, NO prices, max 1 emoji, never pretend to be a customer, never promise sales/clients.
+3. INSTAGRAM MESSAGE: Max 40 words, concise & natural.
+4. FOLLOW-UP 1 (DAY 2): Under 40 words, introduce something useful or ask a relevant question.
+5. FOLLOW-UP 2 (DAY 5): Under 40 words, politely close without pressure.
+6. PREVIEW BRIEF (PART 10): Detailed image-generation brief specifying "${lead.business_name}" as logo text, brand colours note (do not invent branding), suitable Nigerian property image matching ${lead.state}, professional real estate layout, clear headline, property showcase, WhatsApp button, mobile & desktop portrait presentation, explicitly presented as a Concept Homepage Preview.`;
 
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            score: { type: Type.INTEGER },
-            reason: { type: Type.STRING },
-            skip: { type: Type.BOOLEAN },
-            angle: { type: Type.STRING },
-            whatsapp_message: { type: Type.STRING },
-            instagram_message: { type: Type.STRING },
-            followup_1: { type: Type.STRING },
-            followup_2: { type: Type.STRING },
-            preview_brief: { type: Type.STRING },
-          },
-          required: [
-            'score',
-            'reason',
-            'skip',
-            'angle',
-            'whatsapp_message',
-            'instagram_message',
-            'followup_1',
-            'followup_2',
-            'preview_brief',
-          ],
-        },
+  const response = await generateWithFallback(ai, {
+    contents: prompt,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        score: { type: Type.INTEGER },
+        reason: { type: Type.STRING },
+        skip: { type: Type.BOOLEAN },
+        angle: { type: Type.STRING },
+        whatsapp_message: { type: Type.STRING },
+        instagram_message: { type: Type.STRING },
+        followup_1: { type: Type.STRING },
+        followup_2: { type: Type.STRING },
+        preview_brief: { type: Type.STRING },
       },
-    })
-  );
+      required: [
+        'score',
+        'reason',
+        'skip',
+        'angle',
+        'whatsapp_message',
+        'instagram_message',
+        'followup_1',
+        'followup_2',
+        'preview_brief',
+      ],
+    },
+    primaryThinking: ThinkingLevel.MEDIUM,
+  });
 
   const parsed = parseJsonFromText<ModeBOutreachRecord>(response.text, {
     score: lead.opportunity_score,
@@ -835,24 +807,19 @@ PART 9 & PART 7 RULES:
 
 Return JSON with "reply" (string) and "should_mark_closed" (boolean).`;
 
-  const response = await withGeminiRetry(() =>
-    ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: prompt,
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            reply: { type: Type.STRING },
-            should_mark_closed: { type: Type.BOOLEAN },
-          },
-          required: ['reply', 'should_mark_closed'],
-        },
+  const response = await generateWithFallback(ai, {
+    contents: prompt,
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        reply: { type: Type.STRING },
+        should_mark_closed: { type: Type.BOOLEAN },
       },
-    })
-  );
+      required: ['reply', 'should_mark_closed'],
+    },
+    primaryThinking: ThinkingLevel.LOW,
+  });
 
   const parsed = parseJsonFromText<{ reply?: string; should_mark_closed?: boolean }>(
     response.text,
