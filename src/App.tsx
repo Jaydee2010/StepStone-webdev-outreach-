@@ -18,6 +18,7 @@ import {
   NIGERIAN_STATES,
   type AgencyPackagesConfig,
   type DiscoveryResponse,
+  type EngineMode,
   type LeadLifecycleStatus,
   type LeadRecord,
   type LocationSelection,
@@ -38,6 +39,7 @@ const NAV_ITEMS: Array<{
 
 const LS_LEADS_KEY = 'stepstone_leads_v1';
 const LS_PACKAGES_KEY = 'stepstone_packages_v1';
+const LS_ENGINE_KEY = 'stepstone_engine_mode_v1';
 
 const FALLBACK_PACKAGES: AgencyPackagesConfig = {
   deliveryTimeline: 'Approximately 7 days',
@@ -127,6 +129,10 @@ async function parseApiResponse<T>(res: Response): Promise<T> {
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('discovery');
   const [selectedState, setSelectedState] = useState<LocationSelection>('FCT (Abuja)');
+  const [engineMode, setEngineMode] = useState<EngineMode>(() => {
+    const saved = readLocalJson<string>(LS_ENGINE_KEY, 'auto');
+    return saved === 'free' || saved === 'ai' ? saved : 'auto';
+  });
   const [leads, setLeads] = useState<LeadRecord[]>(() =>
     readLocalJson<LeadRecord[]>(LS_LEADS_KEY, [])
   );
@@ -139,11 +145,16 @@ export default function App() {
   const [loadingState, setLoadingState] = useState(true);
   const [discovering, setDiscovering] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [infoNotice, setInfoNotice] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     writeLocalJson(LS_LEADS_KEY, leads);
   }, [leads]);
+
+  useEffect(() => {
+    writeLocalJson(LS_ENGINE_KEY, engineMode);
+  }, [engineMode]);
 
   useEffect(() => {
     if (packages) {
@@ -182,6 +193,7 @@ export default function App() {
   const handleRunDiscovery = async (customKeywords?: string[], maxResults = 5) => {
     if (discovering) return;
     setErrorBanner(null);
+    setInfoNotice(null);
     setDiscovering(true);
     setActiveTab('discovery');
     try {
@@ -193,10 +205,14 @@ export default function App() {
           customKeywords,
           maxResults,
           existingBusinessNames: leads.map((l) => l.business_name),
+          engineMode,
         }),
       });
       const discovery = await parseApiResponse<DiscoveryResponse>(res);
       setLastDiscovery(discovery);
+      if (discovery.quotaNotice) {
+        setInfoNotice(discovery.quotaNotice);
+      }
       setLeads((prev) => [...discovery.leads, ...prev]);
       if (discovery.leads.length > 0) {
         setSelectedLeadId(discovery.leads[0].id);
@@ -218,11 +234,12 @@ export default function App() {
     instagram_url: string;
   }) => {
     setErrorBanner(null);
+    setInfoNotice(null);
     try {
       const res = await fetch('/api/leads/inspect-manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, engineMode }),
       });
       const data = await parseApiResponse<{ lead: LeadRecord }>(res);
       setLeads((prev) => [data.lead, ...prev]);
@@ -236,12 +253,13 @@ export default function App() {
 
   const handleReinspectLead = async (id: string, websiteUrl?: string | null) => {
     setErrorBanner(null);
+    setInfoNotice(null);
     try {
       const targetLead = leads.find((l) => l.id === id);
       const res = await fetch(`/api/leads/${id}/inspect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ website_url: websiteUrl, lead: targetLead }),
+        body: JSON.stringify({ website_url: websiteUrl, lead: targetLead, engineMode }),
       });
       const data = await parseApiResponse<{ lead: LeadRecord }>(res);
       setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
@@ -252,14 +270,21 @@ export default function App() {
 
   const handleGenerateOutreach = async (id: string) => {
     setErrorBanner(null);
+    setInfoNotice(null);
     try {
       const targetLead = leads.find((l) => l.id === id);
       const res = await fetch(`/api/leads/${id}/outreach`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lead: targetLead, packages }),
+        body: JSON.stringify({ lead: targetLead, packages, engineMode }),
       });
-      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      const data = await parseApiResponse<{
+        lead: LeadRecord;
+        quotaNotice?: string | null;
+      }>(res);
+      if (data.quotaNotice) {
+        setInfoNotice(data.quotaNotice);
+      }
       setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to generate outreach.');
@@ -300,18 +325,23 @@ export default function App() {
 
   const handleGenerateReply = async (leadId: string | null, prospectMessage: string) => {
     setErrorBanner(null);
+    setInfoNotice(null);
     try {
       const targetLead = leadId ? leads.find((l) => l.id === leadId) ?? null : null;
       const res = await fetch('/api/reply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leadId, prospectMessage, lead: targetLead, packages }),
+        body: JSON.stringify({ leadId, prospectMessage, lead: targetLead, packages, engineMode }),
       });
       const data = await parseApiResponse<{
         reply: string;
         shouldMarkClosed: boolean;
         lead?: LeadRecord | null;
+        quotaNotice?: string | null;
       }>(res);
+      if (data.quotaNotice) {
+        setInfoNotice(data.quotaNotice);
+      }
       if (data.lead) {
         setLeads((prev) => prev.map((l) => (l.id === data.lead!.id ? data.lead! : l)));
       }
@@ -479,7 +509,22 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <label htmlFor="engine-selector" className="sr-only">
+              Discovery & Generation Engine
+            </label>
+            <select
+              id="engine-selector"
+              value={engineMode}
+              onChange={(e) => setEngineMode(e.target.value as EngineMode)}
+              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 focus:border-emerald-700 focus:outline-none"
+              title="Choose between Auto fallback, Free Directory & Playbook (0 AI quota), or Gemini AI Only"
+            >
+              <option value="auto">Auto (AI → Free Fallback)</option>
+              <option value="free">Free Directory &amp; Playbook (0 AI Quota)</option>
+              <option value="ai">Gemini AI Only</option>
+            </select>
+
             <div className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5">
               <MapPin className="h-3.5 w-3.5 text-emerald-800 shrink-0" />
               <label htmlFor="state-selector" className="sr-only">
@@ -511,6 +556,35 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Transparent Fallback Notice */}
+        {infoNotice && (
+          <div className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 sm:mx-6">
+            <span>{infoNotice}</span>
+            <div className="flex items-center gap-2">
+              {engineMode !== 'free' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEngineMode('free');
+                    setInfoNotice(null);
+                  }}
+                  className="rounded border border-amber-300 bg-white px-2.5 py-1 text-[11px] font-medium text-amber-900 hover:bg-amber-100 whitespace-nowrap"
+                >
+                  Always Use Free Mode
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setInfoNotice(null)}
+                className="rounded p-1 text-amber-800 hover:bg-amber-100"
+                aria-label="Dismiss notice"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Error Notification */}
         {errorBanner && (

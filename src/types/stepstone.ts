@@ -151,12 +151,16 @@ export interface SearchLog {
   notes: string;
 }
 
+export type EngineMode = 'auto' | 'free' | 'ai';
+
 export interface DiscoveryResponse {
   leads: LeadRecord[];
   newlyAddedCount: number;
   duplicatesSkipped: number;
   searchLog: SearchLog;
   honestStatusNote: string;
+  engineUsed?: 'gemini_ai' | 'free_directory';
+  quotaNotice?: string | null;
 }
 
 export function toModeAJson(lead: LeadRecord): ModeALeadRecord {

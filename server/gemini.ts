@@ -1,12 +1,33 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import type {
   AgencyPackagesConfig,
+  EngineMode,
   LeadRecord,
   ModeBOutreachRecord,
   WebsiteClassification,
 } from '../src/types/stepstone.ts';
 import type { HttpInspectionReport } from './inspector.ts';
 import { inspectWebsiteUrl, normalizeUrlInput } from './inspector.ts';
+import { discoverFromFinelibDirectory, qualifyFromHttpEvidence } from './directory.ts';
+import { buildPlaybookOutreachForLead, buildPlaybookReply } from './playbook.ts';
+
+export function isQuotaOrKeyFallbackError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /429|RESOURCE_EXHAUSTED|GEMINI_API_KEY is not configured|API_KEY_INVALID|PERMISSION_DENIED/i.test(
+    msg
+  );
+}
+
+function summarizeGeminiNotice(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err ?? '');
+  if (/GEMINI_API_KEY is not configured/i.test(raw)) {
+    return 'GEMINI_API_KEY is not set on server; switched to 0-quota directory/playbook mode.';
+  }
+  if (/429|RESOURCE_EXHAUSTED/i.test(raw)) {
+    return 'Gemini API returned 429 quota limit; switched to Live Directory / Agency Playbook (0 AI quota used).';
+  }
+  return `Gemini API unavailable (${raw.slice(0, 120)}); switched to 0-quota mode.`;
+}
 
 function getAiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -169,13 +190,40 @@ export async function discoverBusinessesWithSearch(params: {
   customKeywords?: string[];
   existingBusinessNames: string[];
   maxResults?: number;
+  engineMode?: EngineMode;
 }): Promise<{
   candidates: RawDiscoveredCompany[];
   honestNote: string;
   keywordsUsed: string[];
   groundingUrls: string[];
+  engineUsed: 'gemini_ai' | 'free_directory';
+  quotaNotice: string | null;
 }> {
-  const ai = getAiClient();
+  const engineMode: EngineMode = params.engineMode ?? 'auto';
+  if (engineMode === 'free') {
+    const dirResult = await discoverFromFinelibDirectory(params);
+    return {
+      ...dirResult,
+      engineUsed: 'free_directory',
+      quotaNotice: null,
+    };
+  }
+
+  let ai: GoogleGenAI;
+  try {
+    ai = getAiClient();
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      const dirResult = await discoverFromFinelibDirectory(params);
+      return {
+        ...dirResult,
+        honestNote: `${dirResult.honestNote} (Gemini API key missing on server.)`,
+        engineUsed: 'free_directory',
+        quotaNotice: summarizeGeminiNotice(err),
+      };
+    }
+    throw err;
+  }
   const isAllStates = params.selectedState === 'All Nigerian States';
   const keywordsUsed =
     params.customKeywords && params.customKeywords.length > 0
@@ -222,11 +270,26 @@ Return ONLY valid JSON:
   ]
 }`;
 
-  const response = await generateWithFallback(ai, {
-    contents: prompt,
-    tools: [{ googleSearch: {} }],
-    primaryThinking: ThinkingLevel.LOW,
-  });
+  let response;
+  try {
+    response = await generateWithFallback(ai, {
+      contents: prompt,
+      tools: [{ googleSearch: {} }],
+      primaryThinking: ThinkingLevel.LOW,
+    });
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      const dirResult = await discoverFromFinelibDirectory(params);
+      const notice = summarizeGeminiNotice(err);
+      return {
+        ...dirResult,
+        honestNote: `${dirResult.honestNote} [${notice}]`,
+        engineUsed: 'free_directory',
+        quotaNotice: notice,
+      };
+    }
+    throw err;
+  }
 
   const groundingUrls = extractGroundingUrls(response);
   const parsed = parseJsonFromText<{
@@ -292,6 +355,8 @@ Return ONLY valid JSON:
       `Searched ${params.selectedState} across multiple real estate categories and found ${companies.length} candidate companies.`,
     keywordsUsed,
     groundingUrls,
+    engineUsed: 'gemini_ai',
+    quotaNotice: null,
   };
 }
 
@@ -456,7 +521,8 @@ function buildLeadRecord(params: {
 }
 
 export async function inspectAndQualifyBatch(
-  candidates: RawDiscoveredCompany[]
+  candidates: RawDiscoveredCompany[],
+  engineMode: EngineMode = 'auto'
 ): Promise<LeadRecord[]> {
   if (candidates.length === 0) return [];
 
@@ -481,23 +547,55 @@ export async function inspectAndQualifyBatch(
     })
   );
 
-  const ai = getAiClient();
-  const payloadSummary = inspected.map((item, idx) => ({
-    index: idx,
-    business_name: item.raw.business_name,
-    business_category: item.raw.business_category,
-    location: `${item.raw.city ? `${item.raw.city}, ` : ''}${item.raw.state}`,
-    phone: item.raw.phone,
-    website_url: item.websiteUrl,
-    instagram_url: item.instagramUrl,
-    facebook_url: item.facebookUrl,
-    google_business_profile_url: item.raw.google_business_profile_url,
-    discovery_notes: item.raw.discovery_notes,
-    http_inspection_report:
-      item.httpReport ?? 'No independent website URL discovered to inspect via HTTP.',
-  }));
+  if (engineMode === 'free') {
+    return inspected.map((item) =>
+      buildLeadRecord({
+        raw: item.raw,
+        websiteUrl: item.websiteUrl,
+        instagramUrl: item.instagramUrl,
+        facebookUrl: item.facebookUrl,
+        lookupNotes: item.raw.discovery_notes,
+        allSources: item.raw.source_urls,
+        httpReport: item.httpReport,
+        qualification: qualifyFromHttpEvidence({
+          websiteUrl: item.websiteUrl,
+          instagramUrl: item.instagramUrl,
+          facebookUrl: item.facebookUrl,
+          httpReport: item.httpReport,
+          lookupNotes: item.raw.discovery_notes,
+        }),
+      })
+    );
+  }
 
-  const batchPrompt = `Classify the website situation and qualify EACH of these ${inspected.length} Nigerian real estate businesses for Stepstone Web Agency.
+  let qualifications: Array<{
+    index: number;
+    website_status?: WebsiteClassification;
+    inspection_evidence?: string;
+    confidence?: 'High' | 'Medium' | 'Low';
+    opportunity_score?: number;
+    qualification_reason?: string;
+    skip?: boolean;
+  }> = [];
+
+  try {
+    const ai = getAiClient();
+    const payloadSummary = inspected.map((item, idx) => ({
+      index: idx,
+      business_name: item.raw.business_name,
+      business_category: item.raw.business_category,
+      location: `${item.raw.city ? `${item.raw.city}, ` : ''}${item.raw.state}`,
+      phone: item.raw.phone,
+      website_url: item.websiteUrl,
+      instagram_url: item.instagramUrl,
+      facebook_url: item.facebookUrl,
+      google_business_profile_url: item.raw.google_business_profile_url,
+      discovery_notes: item.raw.discovery_notes,
+      http_inspection_report:
+        item.httpReport ?? 'No independent website URL discovered to inspect via HTTP.',
+    }));
+
+    const batchPrompt = `Classify the website situation and qualify EACH of these ${inspected.length} Nigerian real estate businesses for Stepstone Web Agency.
 
 CANDIDATES & LIVE HTTP REPORTS:
 ${JSON.stringify(payloadSummary, null, 2)}
@@ -507,47 +605,60 @@ CLASSIFICATION RULES (choose exactly ONE per company):
 - Do NOT mark broken_website on a single 403/429 WAF block.
 - Score 1-5: 5=Excellent (no/social/broken site + active firm), 4=Strong (weak site or clear gap), 3=Potential, 2=Weak, 1=Poor. If score <= 2, skip MUST be true.`;
 
-  const response = await generateWithFallback(ai, {
-    contents: batchPrompt,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.ARRAY,
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          index: { type: Type.INTEGER },
-          website_status: { type: Type.STRING },
-          inspection_evidence: { type: Type.STRING },
-          confidence: { type: Type.STRING },
-          opportunity_score: { type: Type.INTEGER },
-          qualification_reason: { type: Type.STRING },
-          skip: { type: Type.BOOLEAN },
+    const response = await generateWithFallback(ai, {
+      contents: batchPrompt,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            index: { type: Type.INTEGER },
+            website_status: { type: Type.STRING },
+            inspection_evidence: { type: Type.STRING },
+            confidence: { type: Type.STRING },
+            opportunity_score: { type: Type.INTEGER },
+            qualification_reason: { type: Type.STRING },
+            skip: { type: Type.BOOLEAN },
+          },
+          required: [
+            'index',
+            'website_status',
+            'inspection_evidence',
+            'confidence',
+            'opportunity_score',
+            'qualification_reason',
+            'skip',
+          ],
         },
-        required: [
-          'index',
-          'website_status',
-          'inspection_evidence',
-          'confidence',
-          'opportunity_score',
-          'qualification_reason',
-          'skip',
-        ],
       },
-    },
-    primaryThinking: ThinkingLevel.LOW,
-  });
+      primaryThinking: ThinkingLevel.LOW,
+    });
 
-  const qualifications = parseJsonFromText<
-    Array<{
-      index: number;
-      website_status?: WebsiteClassification;
-      inspection_evidence?: string;
-      confidence?: 'High' | 'Medium' | 'Low';
-      opportunity_score?: number;
-      qualification_reason?: string;
-      skip?: boolean;
-    }>
-  >(response.text, []);
+    qualifications = parseJsonFromText(response.text, []);
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      return inspected.map((item) =>
+        buildLeadRecord({
+          raw: item.raw,
+          websiteUrl: item.websiteUrl,
+          instagramUrl: item.instagramUrl,
+          facebookUrl: item.facebookUrl,
+          lookupNotes: item.raw.discovery_notes,
+          allSources: item.raw.source_urls,
+          httpReport: item.httpReport,
+          qualification: qualifyFromHttpEvidence({
+            websiteUrl: item.websiteUrl,
+            instagramUrl: item.instagramUrl,
+            facebookUrl: item.facebookUrl,
+            httpReport: item.httpReport,
+            lookupNotes: item.raw.discovery_notes,
+          }),
+        })
+      );
+    }
+    throw err;
+  }
 
   return inspected.map((item, idx) => {
     const q = qualifications.find((entry) => entry.index === idx) ?? qualifications[idx] ?? {};
@@ -566,7 +677,8 @@ CLASSIFICATION RULES (choose exactly ONE per company):
 
 export async function inspectAndQualifyCandidate(
   raw: RawDiscoveredCompany,
-  allowSearchLookup = true
+  allowSearchLookup = true,
+  engineMode: EngineMode = 'auto'
 ): Promise<LeadRecord> {
   let websiteUrl = raw.website_url;
   let instagramUrl = raw.instagram_url;
@@ -574,7 +686,7 @@ export async function inspectAndQualifyCandidate(
   let lookupNotes = raw.discovery_notes;
   let allSources = [...raw.source_urls];
 
-  if (!websiteUrl && allowSearchLookup) {
+  if (!websiteUrl && allowSearchLookup && engineMode !== 'free') {
     try {
       const lookup = await lookupWebsiteAndSocials({
         business_name: raw.business_name,
@@ -603,8 +715,28 @@ export async function inspectAndQualifyCandidate(
     }
   }
 
-  const ai = getAiClient();
-  const qualificationPrompt = `Classify the website situation and qualify this Nigerian real estate business for Stepstone Web Agency.
+  if (engineMode === 'free') {
+    return buildLeadRecord({
+      raw,
+      websiteUrl,
+      instagramUrl,
+      facebookUrl,
+      lookupNotes,
+      allSources,
+      httpReport,
+      qualification: qualifyFromHttpEvidence({
+        websiteUrl,
+        instagramUrl,
+        facebookUrl,
+        httpReport,
+        lookupNotes,
+      }),
+    });
+  }
+
+  try {
+    const ai = getAiClient();
+    const qualificationPrompt = `Classify the website situation and qualify this Nigerian real estate business for Stepstone Web Agency.
 
 COMPANY RECORD:
 - Business Name: ${raw.business_name}
@@ -625,84 +757,119 @@ CLASSIFICATION RULES:
 - If score is 1 or 2, skip MUST be true. Otherwise skip MUST be false.
 - Do NOT invent inspection facts not present in the HTTP report or discovery notes.`;
 
-  const response = await generateWithFallback(ai, {
-    contents: qualificationPrompt,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.OBJECT,
-      properties: {
-        website_status: { type: Type.STRING },
-        inspection_evidence: { type: Type.STRING },
-        confidence: { type: Type.STRING },
-        opportunity_score: { type: Type.INTEGER },
-        qualification_reason: { type: Type.STRING },
-        skip: { type: Type.BOOLEAN },
+    const response = await generateWithFallback(ai, {
+      contents: qualificationPrompt,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          website_status: { type: Type.STRING },
+          inspection_evidence: { type: Type.STRING },
+          confidence: { type: Type.STRING },
+          opportunity_score: { type: Type.INTEGER },
+          qualification_reason: { type: Type.STRING },
+          skip: { type: Type.BOOLEAN },
+        },
+        required: [
+          'website_status',
+          'inspection_evidence',
+          'confidence',
+          'opportunity_score',
+          'qualification_reason',
+          'skip',
+        ],
       },
-      required: [
-        'website_status',
-        'inspection_evidence',
-        'confidence',
-        'opportunity_score',
-        'qualification_reason',
-        'skip',
-      ],
-    },
-    primaryThinking: ThinkingLevel.LOW,
-  });
+      primaryThinking: ThinkingLevel.LOW,
+    });
 
-  const result = parseJsonFromText<{
-    website_status?: WebsiteClassification;
-    inspection_evidence?: string;
-    confidence?: 'High' | 'Medium' | 'Low';
-    opportunity_score?: number;
-    qualification_reason?: string;
-    skip?: boolean;
-  }>(response.text, {});
+    const result = parseJsonFromText<{
+      website_status?: WebsiteClassification;
+      inspection_evidence?: string;
+      confidence?: 'High' | 'Medium' | 'Low';
+      opportunity_score?: number;
+      qualification_reason?: string;
+      skip?: boolean;
+    }>(response.text, {});
 
-  return buildLeadRecord({
-    raw,
-    websiteUrl,
-    instagramUrl,
-    facebookUrl,
-    lookupNotes,
-    allSources,
-    httpReport,
-    qualification: result,
-  });
+    return buildLeadRecord({
+      raw,
+      websiteUrl,
+      instagramUrl,
+      facebookUrl,
+      lookupNotes,
+      allSources,
+      httpReport,
+      qualification: result,
+    });
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      return buildLeadRecord({
+        raw,
+        websiteUrl,
+        instagramUrl,
+        facebookUrl,
+        lookupNotes,
+        allSources,
+        httpReport,
+        qualification: qualifyFromHttpEvidence({
+          websiteUrl,
+          instagramUrl,
+          facebookUrl,
+          httpReport,
+          lookupNotes,
+        }),
+      });
+    }
+    throw err;
+  }
 }
 
 export async function generateOutreachForLead(
   lead: LeadRecord,
-  packages: AgencyPackagesConfig
-): Promise<ModeBOutreachRecord> {
+  packages: AgencyPackagesConfig,
+  engineMode: EngineMode = 'auto'
+): Promise<{
+  outreach: ModeBOutreachRecord;
+  engineUsed: 'gemini_ai' | 'free_playbook';
+  quotaNotice: string | null;
+}> {
   if (lead.skip || lead.opportunity_score <= 2) {
     throw new Error(
       `Outreach is blocked for "${lead.business_name}" because it is marked skip (score ${lead.opportunity_score}/5).`
     );
   }
 
-  const ai = getAiClient();
-  const prompt = `Generate Mode B personalized outreach and a homepage mockup image-generation brief for Stepstone Web Agency (Abuja, Nigeria, run by Jaydee).
+  if (engineMode === 'free') {
+    return {
+      outreach: buildPlaybookOutreachForLead(lead, packages),
+      engineUsed: 'free_playbook',
+      quotaNotice: null,
+    };
+  }
+
+  try {
+    const ai = getAiClient();
+    const prompt = `Generate Mode B personalized outreach and a homepage mockup image-generation brief for Stepstone Web Agency (Abuja, Nigeria, run by Jaydee).
 
 PROSPECT DATA (VERIFIED):
 ${JSON.stringify(
-    {
-      business_name: lead.business_name,
-      business_category: lead.business_category,
-      state: lead.state,
-      city: lead.city,
-      website_url: lead.website_url,
-      final_destination_url: lead.final_destination_url,
-      instagram_url: lead.instagram_url,
-      facebook_url: lead.facebook_url,
-      website_status: lead.website_status,
-      inspection_evidence: lead.inspection_evidence,
-      opportunity_score: lead.opportunity_score,
-      qualification_reason: lead.qualification_reason,
-    },
-    null,
-    2
-  )}
+      {
+        business_name: lead.business_name,
+        business_category: lead.business_category,
+        state: lead.state,
+        city: lead.city,
+        website_url: lead.website_url,
+        final_destination_url: lead.final_destination_url,
+        instagram_url: lead.instagram_url,
+        facebook_url: lead.facebook_url,
+        website_status: lead.website_status,
+        inspection_evidence: lead.inspection_evidence,
+        opportunity_score: lead.opportunity_score,
+        qualification_reason: lead.qualification_reason,
+      },
+      null,
+      2
+    )}
 
 OUR OFFER CONTEXT (do NOT include prices or package lists in first outreach messages):
 - Free homepage preview using the company's actual name before anyone pays.
@@ -716,77 +883,108 @@ STRICT OUTREACH RULES:
 5. FOLLOW-UP 2 (DAY 5): Under 40 words, politely close without pressure.
 6. PREVIEW BRIEF (PART 10): Detailed image-generation brief specifying "${lead.business_name}" as logo text, brand colours note (do not invent branding), suitable Nigerian property image matching ${lead.state}, professional real estate layout, clear headline, property showcase, WhatsApp button, mobile & desktop portrait presentation, explicitly presented as a Concept Homepage Preview.`;
 
-  const response = await generateWithFallback(ai, {
-    contents: prompt,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.OBJECT,
-      properties: {
-        score: { type: Type.INTEGER },
-        reason: { type: Type.STRING },
-        skip: { type: Type.BOOLEAN },
-        angle: { type: Type.STRING },
-        whatsapp_message: { type: Type.STRING },
-        instagram_message: { type: Type.STRING },
-        followup_1: { type: Type.STRING },
-        followup_2: { type: Type.STRING },
-        preview_brief: { type: Type.STRING },
+    const response = await generateWithFallback(ai, {
+      contents: prompt,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          score: { type: Type.INTEGER },
+          reason: { type: Type.STRING },
+          skip: { type: Type.BOOLEAN },
+          angle: { type: Type.STRING },
+          whatsapp_message: { type: Type.STRING },
+          instagram_message: { type: Type.STRING },
+          followup_1: { type: Type.STRING },
+          followup_2: { type: Type.STRING },
+          preview_brief: { type: Type.STRING },
+        },
+        required: [
+          'score',
+          'reason',
+          'skip',
+          'angle',
+          'whatsapp_message',
+          'instagram_message',
+          'followup_1',
+          'followup_2',
+          'preview_brief',
+        ],
       },
-      required: [
-        'score',
-        'reason',
-        'skip',
-        'angle',
-        'whatsapp_message',
-        'instagram_message',
-        'followup_1',
-        'followup_2',
-        'preview_brief',
-      ],
-    },
-    primaryThinking: ThinkingLevel.MEDIUM,
-  });
+      primaryThinking: ThinkingLevel.MEDIUM,
+    });
 
-  const parsed = parseJsonFromText<ModeBOutreachRecord>(response.text, {
-    score: lead.opportunity_score,
-    reason: lead.qualification_reason,
-    skip: false,
-    angle: 'no_website',
-    whatsapp_message: '',
-    instagram_message: '',
-    followup_1: '',
-    followup_2: '',
-    preview_brief: '',
-  });
+    const parsed = parseJsonFromText<ModeBOutreachRecord>(response.text, {
+      score: lead.opportunity_score,
+      reason: lead.qualification_reason,
+      skip: false,
+      angle: 'no_website',
+      whatsapp_message: '',
+      instagram_message: '',
+      followup_1: '',
+      followup_2: '',
+      preview_brief: '',
+    });
 
-  return {
-    ...parsed,
-    score: lead.opportunity_score,
-    skip: false,
-  };
+    return {
+      outreach: {
+        ...parsed,
+        score: lead.opportunity_score,
+        skip: false,
+      },
+      engineUsed: 'gemini_ai',
+      quotaNotice: null,
+    };
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      return {
+        outreach: buildPlaybookOutreachForLead(lead, packages),
+        engineUsed: 'free_playbook',
+        quotaNotice: summarizeGeminiNotice(err),
+      };
+    }
+    throw err;
+  }
 }
 
 export async function generateProspectReply(params: {
   lead: LeadRecord | null;
   prospectMessage: string;
   packages: AgencyPackagesConfig;
-}): Promise<{ reply: string; shouldMarkClosed: boolean }> {
-  const ai = getAiClient();
-  const packagesSummary = params.packages.tiers
-    .map(
-      (t) =>
-        `${t.name.toUpperCase()} — ₦${t.priceNaira.toLocaleString('en-NG')} (${t.pagesLabel}): ${t.features.join(', ')}`
-    )
-    .join('\n');
+  engineMode?: EngineMode;
+}): Promise<{
+  reply: string;
+  shouldMarkClosed: boolean;
+  engineUsed: 'gemini_ai' | 'free_playbook';
+  quotaNotice: string | null;
+}> {
+  const engineMode: EngineMode = params.engineMode ?? 'auto';
+  if (engineMode === 'free') {
+    const playbook = buildPlaybookReply(params);
+    return {
+      ...playbook,
+      engineUsed: 'free_playbook',
+      quotaNotice: null,
+    };
+  }
 
-  const prompt = `You are replying on behalf of Stepstone Web Agency (Abuja, Nigeria, run by Jaydee) to a real estate prospect's message.
+  try {
+    const ai = getAiClient();
+    const packagesSummary = params.packages.tiers
+      .map(
+        (t) =>
+          `${t.name.toUpperCase()} — ₦${t.priceNaira.toLocaleString('en-NG')} (${t.pagesLabel}): ${t.features.join(', ')}`
+      )
+      .join('\n');
+
+    const prompt = `You are replying on behalf of Stepstone Web Agency (Abuja, Nigeria, run by Jaydee) to a real estate prospect's message.
 
 PROSPECT CONTEXT:
 ${
-    params.lead
-      ? `Company: ${params.lead.business_name} (${params.lead.business_category}, ${params.lead.state})\nWebsite status: ${params.lead.website_status}\nVerified note: ${params.lead.inspection_evidence}`
-      : 'General Nigerian real estate prospect inquiry'
-  }
+      params.lead
+        ? `Company: ${params.lead.business_name} (${params.lead.business_category}, ${params.lead.state})\nWebsite status: ${params.lead.website_status}\nVerified note: ${params.lead.inspection_evidence}`
+        : 'General Nigerian real estate prospect inquiry'
+    }
 
 PROSPECT MESSAGE:
 "${params.prospectMessage}"
@@ -807,29 +1005,42 @@ PART 9 & PART 7 RULES:
 
 Return JSON with "reply" (string) and "should_mark_closed" (boolean).`;
 
-  const response = await generateWithFallback(ai, {
-    contents: prompt,
-    responseMimeType: 'application/json',
-    responseSchema: {
-      type: Type.OBJECT,
-      properties: {
-        reply: { type: Type.STRING },
-        should_mark_closed: { type: Type.BOOLEAN },
+    const response = await generateWithFallback(ai, {
+      contents: prompt,
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          reply: { type: Type.STRING },
+          should_mark_closed: { type: Type.BOOLEAN },
+        },
+        required: ['reply', 'should_mark_closed'],
       },
-      required: ['reply', 'should_mark_closed'],
-    },
-    primaryThinking: ThinkingLevel.LOW,
-  });
+      primaryThinking: ThinkingLevel.LOW,
+    });
 
-  const parsed = parseJsonFromText<{ reply?: string; should_mark_closed?: boolean }>(
-    response.text,
-    { reply: '', should_mark_closed: false }
-  );
+    const parsed = parseJsonFromText<{ reply?: string; should_mark_closed?: boolean }>(
+      response.text,
+      { reply: '', should_mark_closed: false }
+    );
 
-  return {
-    reply:
-      parsed.reply ||
-      'Thank you for your response. Please let us know if you would like to review a free homepage preview.',
-    shouldMarkClosed: Boolean(parsed.should_mark_closed),
-  };
+    return {
+      reply:
+        parsed.reply ||
+        'Thank you for your response. Please let us know if you would like to review a free homepage preview.',
+      shouldMarkClosed: Boolean(parsed.should_mark_closed),
+      engineUsed: 'gemini_ai',
+      quotaNotice: null,
+    };
+  } catch (err) {
+    if (engineMode === 'auto' && isQuotaOrKeyFallbackError(err)) {
+      const playbook = buildPlaybookReply(params);
+      return {
+        ...playbook,
+        engineUsed: 'free_playbook',
+        quotaNotice: summarizeGeminiNotice(err),
+      };
+    }
+    throw err;
+  }
 }

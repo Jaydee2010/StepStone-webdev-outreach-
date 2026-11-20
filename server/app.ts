@@ -17,10 +17,15 @@ import {
   ALL_STATES_OPTION,
   NIGERIAN_STATES,
   type AgencyPackagesConfig,
+  type EngineMode,
   type LeadLifecycleStatus,
   type LeadRecord,
   type SearchLog,
 } from '../src/types/stepstone.ts';
+
+function normalizeEngineMode(val: unknown): EngineMode {
+  return val === 'free' || val === 'ai' ? val : 'auto';
+}
 
 function isValidLocation(loc: string): boolean {
   if (loc === ALL_STATES_OPTION) return true;
@@ -38,26 +43,47 @@ function extractApiError(err: unknown): { status: number; message: string } {
   }
   if (/RESOURCE_EXHAUSTED|429/i.test(rawMsg)) {
     let readable = rawMsg;
+    let quotaMetrics: string[] = [];
+    let retryDelay = '';
     try {
       const jsonMatch = rawMsg.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]) as {
-          error?: { message?: string };
+          error?: {
+            message?: string;
+            details?: Array<{
+              retryDelay?: string;
+              violations?: Array<{ quotaMetric?: string; quotaId?: string; quotaValue?: string }>;
+            }>;
+          };
         };
         if (parsed?.error?.message) {
           readable = parsed.error.message;
+        }
+        for (const d of parsed?.error?.details ?? []) {
+          if (d.retryDelay) retryDelay = d.retryDelay;
+          for (const v of d.violations ?? []) {
+            if (v.quotaMetric || v.quotaId) {
+              quotaMetrics.push(
+                `${v.quotaId || v.quotaMetric}${v.quotaValue ? ` (limit: ${v.quotaValue})` : ''}`
+              );
+            }
+          }
         }
       }
     } catch {
       // Keep raw message if not JSON
     }
-    const isZeroLimit = /limit:\s*0\b/i.test(rawMsg);
-    const hint = isZeroLimit
-      ? 'Google returned limit: 0 for your current API key tier on this model/Search Grounding. Link a billing account to your project in Google AI Studio (aistudio.google.com) to unlock paid-tier quota.'
-      : 'Wait ~60 seconds for per-minute limits to reset, or upgrade your project to Pay-as-you-go billing in Google AI Studio (aistudio.google.com).';
+
+    const isPerMinute = /PerMinute|RPM|TPM/i.test(rawMsg) && !/limit:\s*0\b/i.test(rawMsg);
+    const metricsSummary = quotaMetrics.length > 0 ? ` [${quotaMetrics.join(', ')}]` : '';
+    const hint = isPerMinute
+      ? `Rate limit hit (${retryDelay ? `retry after ${retryDelay}` : 'wait ~60s'}) or upgrade your project to Pay-as-you-go billing in Google AI Studio.`
+      : 'Your API key free-tier/daily quota is exhausted or set to 0 for this model/Search Grounding (waiting 60s will not reset this). Open https://aistudio.google.com/apikey -> link a Billing account (Pay-as-you-go) and verify usage at https://ai.dev/usage?tab=rate-limit.';
+
     return {
       status: 429,
-      message: `Gemini API 429 Quota Error: ${readable.replace(/\s+/g, ' ').slice(0, 220)} — ${hint}`,
+      message: `Gemini API 429 Quota Error${metricsSummary}: ${readable.replace(/\s+/g, ' ').slice(0, 400)} — ${hint}`,
     };
   }
   return { status: 500, message: rawMsg };
@@ -75,12 +101,14 @@ export function createApiRouter(): express.Router {
   // Mode A: State-locked Business Discovery + Website Investigation + Qualification
   router.post('/discover', async (req, res) => {
     try {
-      const { selectedState, customKeywords, maxResults, existingBusinessNames } = req.body as {
-        selectedState?: string;
-        customKeywords?: string[];
-        maxResults?: number;
-        existingBusinessNames?: string[];
-      };
+      const { selectedState, customKeywords, maxResults, existingBusinessNames, engineMode } =
+        req.body as {
+          selectedState?: string;
+          customKeywords?: string[];
+          maxResults?: number;
+          existingBusinessNames?: string[];
+          engineMode?: EngineMode;
+        };
 
       const targetState = selectedState || 'FCT (Abuja)';
       if (!isValidLocation(targetState)) {
@@ -89,6 +117,7 @@ export function createApiRouter(): express.Router {
         });
       }
 
+      const mode = normalizeEngineMode(engineMode);
       const db = readDb();
       const clientNames = Array.isArray(existingBusinessNames)
         ? existingBusinessNames.filter((n) => typeof n === 'string' && n.trim().length > 0)
@@ -104,6 +133,7 @@ export function createApiRouter(): express.Router {
           : undefined,
         existingBusinessNames: combinedExistingNames,
         maxResults: typeof maxResults === 'number' ? maxResults : 5,
+        engineMode: mode,
       });
 
       const uniqueCandidates: RawDiscoveredCompany[] = [];
@@ -130,7 +160,9 @@ export function createApiRouter(): express.Router {
         }
       }
 
-      const verifiedLeads = await inspectAndQualifyBatch(uniqueCandidates);
+      const inspectMode: EngineMode =
+        discovery.engineUsed === 'free_directory' && mode !== 'ai' ? 'free' : mode;
+      const verifiedLeads = await inspectAndQualifyBatch(uniqueCandidates, inspectMode);
       db.leads = [...verifiedLeads, ...db.leads];
 
       const searchLog: SearchLog = {
@@ -151,6 +183,8 @@ export function createApiRouter(): express.Router {
         duplicatesSkipped,
         searchLog,
         honestStatusNote: discovery.honestNote,
+        engineUsed: discovery.engineUsed,
+        quotaNotice: discovery.quotaNotice,
       });
     } catch (err) {
       const apiErr = extractApiError(err);
@@ -161,16 +195,25 @@ export function createApiRouter(): express.Router {
   // Manual single-business lookup + live website inspection
   router.post('/leads/inspect-manual', async (req, res) => {
     try {
-      const { business_name, business_category, state, city, website_url, phone, instagram_url } =
-        req.body as {
-          business_name?: string;
-          business_category?: string;
-          state?: string;
-          city?: string;
-          website_url?: string | null;
-          phone?: string | null;
-          instagram_url?: string | null;
-        };
+      const {
+        business_name,
+        business_category,
+        state,
+        city,
+        website_url,
+        phone,
+        instagram_url,
+        engineMode,
+      } = req.body as {
+        business_name?: string;
+        business_category?: string;
+        state?: string;
+        city?: string;
+        website_url?: string | null;
+        phone?: string | null;
+        instagram_url?: string | null;
+        engineMode?: EngineMode;
+      };
 
       if (!business_name || !business_name.trim()) {
         return res.status(400).json({ error: 'Company name is required.' });
@@ -194,19 +237,24 @@ export function createApiRouter(): express.Router {
         });
       }
 
-      const lead = await inspectAndQualifyCandidate({
-        business_name: business_name.trim(),
-        business_category: (business_category || 'Real Estate Company').trim(),
-        state: targetState,
-        city: (city || '').trim(),
-        phone: phone?.trim() || null,
-        website_url: website_url?.trim() || null,
-        instagram_url: instagram_url?.trim() || null,
-        facebook_url: null,
-        google_business_profile_url: null,
-        source_urls: [],
-        discovery_notes: 'Added manually for website investigation.',
-      });
+      const mode = normalizeEngineMode(engineMode);
+      const lead = await inspectAndQualifyCandidate(
+        {
+          business_name: business_name.trim(),
+          business_category: (business_category || 'Real Estate Company').trim(),
+          state: targetState,
+          city: (city || '').trim(),
+          phone: phone?.trim() || null,
+          website_url: website_url?.trim() || null,
+          instagram_url: instagram_url?.trim() || null,
+          facebook_url: null,
+          google_business_profile_url: null,
+          source_urls: [],
+          discovery_notes: 'Added manually for website investigation.',
+        },
+        mode !== 'free',
+        mode
+      );
 
       db.leads = [lead, ...db.leads];
       writeDb(db);
@@ -221,9 +269,10 @@ export function createApiRouter(): express.Router {
   router.post('/leads/:id/inspect', async (req, res) => {
     try {
       const { id } = req.params;
-      const { website_url, lead: clientLead } = (req.body || {}) as {
+      const { website_url, lead: clientLead, engineMode } = (req.body || {}) as {
         website_url?: string | null;
         lead?: LeadRecord;
+        engineMode?: EngineMode;
       };
       const db = readDb();
       const idx = db.leads.findIndex((l) => l.id === id);
@@ -232,19 +281,24 @@ export function createApiRouter(): express.Router {
         return res.status(404).json({ error: 'Lead not found.' });
       }
 
-      const updatedLead = await inspectAndQualifyCandidate({
-        business_name: existing.business_name,
-        business_category: existing.business_category,
-        state: existing.state,
-        city: existing.city,
-        phone: existing.phone,
-        website_url: website_url !== undefined ? website_url : existing.website_url,
-        instagram_url: existing.instagram_url,
-        facebook_url: existing.facebook_url,
-        google_business_profile_url: existing.google_business_profile_url,
-        source_urls: existing.source_urls,
-        discovery_notes: existing.inspection_evidence,
-      });
+      const mode = normalizeEngineMode(engineMode);
+      const updatedLead = await inspectAndQualifyCandidate(
+        {
+          business_name: existing.business_name,
+          business_category: existing.business_category,
+          state: existing.state,
+          city: existing.city,
+          phone: existing.phone,
+          website_url: website_url !== undefined ? website_url : existing.website_url,
+          instagram_url: existing.instagram_url,
+          facebook_url: existing.facebook_url,
+          google_business_profile_url: existing.google_business_profile_url,
+          source_urls: existing.source_urls,
+          discovery_notes: existing.inspection_evidence,
+        },
+        mode !== 'free',
+        mode
+      );
 
       const merged: LeadRecord = {
         ...updatedLead,
@@ -271,9 +325,10 @@ export function createApiRouter(): express.Router {
   router.post('/leads/:id/outreach', async (req, res) => {
     try {
       const { id } = req.params;
-      const { lead: clientLead, packages: clientPackages } = (req.body || {}) as {
+      const { lead: clientLead, packages: clientPackages, engineMode } = (req.body || {}) as {
         lead?: LeadRecord;
         packages?: AgencyPackagesConfig;
+        engineMode?: EngineMode;
       };
       const db = readDb();
       const idx = db.leads.findIndex((l) => l.id === id);
@@ -289,10 +344,14 @@ export function createApiRouter(): express.Router {
       }
 
       const activePackages = clientPackages ?? db.packages;
-      const outreach = await generateOutreachForLead(lead, activePackages);
+      const result = await generateOutreachForLead(
+        lead,
+        activePackages,
+        normalizeEngineMode(engineMode)
+      );
       const updatedLead: LeadRecord = {
         ...lead,
-        outreach,
+        outreach: result.outreach,
         lead_lifecycle: lead.lead_lifecycle === 'new' ? 'outreach_ready' : lead.lead_lifecycle,
       };
       if (idx !== -1) {
@@ -301,7 +360,12 @@ export function createApiRouter(): express.Router {
         db.leads = [updatedLead, ...db.leads];
       }
       writeDb(db);
-      res.json({ lead: updatedLead, outreach });
+      res.json({
+        lead: updatedLead,
+        outreach: result.outreach,
+        engineUsed: result.engineUsed,
+        quotaNotice: result.quotaNotice,
+      });
     } catch (err) {
       const apiErr = extractApiError(err);
       res.status(apiErr.status).json({ error: apiErr.message });
@@ -352,13 +416,19 @@ export function createApiRouter(): express.Router {
   // Reply Handling endpoint (returns { reply } + optional lead closure)
   router.post('/reply', async (req, res) => {
     try {
-      const { leadId, prospectMessage, lead: clientLead, packages: clientPackages } =
-        req.body as {
-          leadId?: string | null;
-          prospectMessage?: string;
-          lead?: LeadRecord | null;
-          packages?: AgencyPackagesConfig;
-        };
+      const {
+        leadId,
+        prospectMessage,
+        lead: clientLead,
+        packages: clientPackages,
+        engineMode,
+      } = req.body as {
+        leadId?: string | null;
+        prospectMessage?: string;
+        lead?: LeadRecord | null;
+        packages?: AgencyPackagesConfig;
+        engineMode?: EngineMode;
+      };
       if (!prospectMessage || !prospectMessage.trim()) {
         return res.status(400).json({ error: 'Prospect message is required.' });
       }
@@ -371,6 +441,7 @@ export function createApiRouter(): express.Router {
         lead,
         prospectMessage: prospectMessage.trim(),
         packages: activePackages,
+        engineMode: normalizeEngineMode(engineMode),
       });
 
       let updatedLead: LeadRecord | null = lead;
@@ -391,6 +462,8 @@ export function createApiRouter(): express.Router {
         reply: result.reply,
         shouldMarkClosed: result.shouldMarkClosed,
         lead: updatedLead,
+        engineUsed: result.engineUsed,
+        quotaNotice: result.quotaNotice,
       });
     } catch (err) {
       const apiErr = extractApiError(err);
