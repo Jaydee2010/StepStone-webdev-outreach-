@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { Check, Code2, Copy, MessageSquareReply } from 'lucide-react';
+import { Check, Code2, Copy, MessageCircle, MessageSquareReply } from 'lucide-react';
 import type { AgencyPackagesConfig, LeadRecord } from '../types/stepstone.ts';
+import { buildWhatsAppChatUrl, formatNigerianWhatsAppDigits } from '../utils/whatsapp.ts';
 
 interface ReplyHandlerViewProps {
   leads: LeadRecord[];
@@ -35,6 +36,11 @@ export function ReplyHandlerView({
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showJson, setShowJson] = useState(false);
+
+  const linkedLead = selectedLeadId
+    ? leads.find((l) => l.id === selectedLeadId) ?? null
+    : null;
+  const linkedWhatsAppDigits = formatNigerianWhatsAppDigits(linkedLead?.phone);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -178,6 +184,24 @@ export function ReplyHandlerView({
                   </>
                 )}
               </button>
+              <a
+                href={buildWhatsAppChatUrl(linkedLead?.phone, replyResult.reply)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-900 whitespace-nowrap"
+                title={
+                  linkedWhatsAppDigits
+                    ? `Send reply on WhatsApp to +${linkedWhatsAppDigits}`
+                    : 'Open WhatsApp with drafted reply prefilled'
+                }
+              >
+                <MessageCircle className="h-3.5 w-3.5" />
+                <span>
+                  {linkedWhatsAppDigits
+                    ? `Open in WhatsApp (+${linkedWhatsAppDigits})`
+                    : 'Open in WhatsApp'}
+                </span>
+              </a>
             </div>
           </div>
 

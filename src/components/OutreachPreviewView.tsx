@@ -1,6 +1,16 @@
-import React, { useMemo, useState } from 'react';
-import { Check, Code2, Copy, RefreshCw, Send } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Check,
+  Code2,
+  Copy,
+  ExternalLink,
+  MessageCircle,
+  Phone,
+  RefreshCw,
+  Send,
+} from 'lucide-react';
 import type { LeadLifecycleStatus, LeadRecord } from '../types/stepstone.ts';
+import { buildWhatsAppChatUrl, formatNigerianWhatsAppDigits } from '../utils/whatsapp.ts';
 import { ConceptMockupPreview } from './ConceptMockupPreview.tsx';
 
 interface OutreachPreviewViewProps {
@@ -9,6 +19,7 @@ interface OutreachPreviewViewProps {
   onSelectLead: (id: string) => void;
   onGenerateOutreach: (id: string) => Promise<void>;
   onUpdateLifecycle: (id: string, lifecycle: LeadLifecycleStatus) => Promise<void>;
+  onUpdatePhone?: (id: string, phone: string | null) => Promise<void>;
 }
 
 function wordCount(text: string): number {
@@ -21,10 +32,14 @@ export function OutreachPreviewView({
   onSelectLead,
   onGenerateOutreach,
   onUpdateLifecycle,
+  onUpdatePhone,
 }: OutreachPreviewViewProps) {
   const [generating, setGenerating] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [showModeBJson, setShowModeBJson] = useState(false);
+  const [editingPhone, setEditingPhone] = useState(false);
+  const [phoneInput, setPhoneInput] = useState('');
+  const [savingPhone, setSavingPhone] = useState(false);
 
   const qualifiedLeads = useMemo(
     () => leads.filter((l) => !l.skip && l.opportunity_score >= 3),
@@ -35,6 +50,25 @@ export function OutreachPreviewView({
     const matched = qualifiedLeads.find((l) => l.id === selectedLeadId);
     return matched ?? qualifiedLeads[0] ?? null;
   }, [qualifiedLeads, selectedLeadId]);
+
+  useEffect(() => {
+    setPhoneInput(activeLead?.phone ?? '');
+    setEditingPhone(false);
+  }, [activeLead?.id, activeLead?.phone]);
+
+  const handleSavePhone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeLead || !onUpdatePhone || savingPhone) return;
+    setSavingPhone(true);
+    try {
+      await onUpdatePhone(activeLead.id, phoneInput.trim() || null);
+      setEditingPhone(false);
+    } finally {
+      setSavingPhone(false);
+    }
+  };
+
+  const activeWhatsAppDigits = formatNigerianWhatsAppDigits(activeLead?.phone);
 
   const handleCopy = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -164,8 +198,63 @@ export function OutreachPreviewView({
               </div>
             </div>
 
+            {/* WhatsApp Target Number & Quick Edit */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-slate-600">
+                <Phone className="h-3.5 w-3.5 text-emerald-700 shrink-0" />
+                <span>WhatsApp Target:</span>
+                {activeWhatsAppDigits ? (
+                  <span className="font-mono font-medium text-slate-900">
+                    +{activeWhatsAppDigits}
+                  </span>
+                ) : (
+                  <span className="text-amber-700">
+                    No phone saved (links open WhatsApp to pick contact)
+                  </span>
+                )}
+                {onUpdatePhone && !editingPhone && (
+                  <button
+                    type="button"
+                    onClick={() => setEditingPhone(true)}
+                    className="ml-1 text-emerald-800 underline decoration-emerald-700/40 hover:text-emerald-900"
+                  >
+                    {activeLead.phone ? 'Edit phone' : 'Add phone'}
+                  </button>
+                )}
+              </div>
+
+              {editingPhone && (
+                <form onSubmit={handleSavePhone} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={phoneInput}
+                    onChange={(e) => setPhoneInput(e.target.value)}
+                    placeholder="e.g. 0803 944 8950"
+                    className="w-44 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-mono text-slate-900 focus:border-emerald-700 focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={savingPhone}
+                    className="rounded-md bg-emerald-800 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-900 disabled:opacity-50"
+                  >
+                    {savingPhone ? 'Saving...' : 'Save'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhoneInput(activeLead.phone ?? '');
+                      setEditingPhone(false);
+                    }}
+                    className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
+            </div>
+
             {activeLead.outreach && (
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs">
                 <div className="text-slate-600">
                   Outreach Angle:{' '}
                   <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-800">
@@ -228,6 +317,7 @@ export function OutreachPreviewView({
           {/* 4 Outreach Messages */}
           {activeLead.outreach ? (
             <>
+              {/* 4 Outreach Messages */}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 {(
                   [
@@ -236,66 +326,106 @@ export function OutreachPreviewView({
                       title: 'First WhatsApp Message',
                       limitNote: 'Under 60 words · Max 1 emoji · No prices',
                       text: activeLead.outreach.whatsapp_message,
+                      channel: 'whatsapp' as const,
                     },
                     {
                       key: 'instagram',
                       title: 'Instagram DM',
                       limitNote: 'Max 40 words · Concise & natural',
                       text: activeLead.outreach.instagram_message,
+                      channel: 'instagram' as const,
                     },
                     {
                       key: 'followup1',
                       title: 'Follow-up 1 — Day 2',
                       limitNote: 'Under 40 words · Helpful insight/question',
                       text: activeLead.outreach.followup_1,
+                      channel: 'whatsapp' as const,
                     },
                     {
                       key: 'followup2',
                       title: 'Follow-up 2 — Day 5',
                       limitNote: 'Under 40 words · Polite no-pressure close',
                       text: activeLead.outreach.followup_2,
+                      channel: 'whatsapp' as const,
                     },
                   ] as const
-                ).map((item) => (
-                  <div
-                    key={item.key}
-                    className="flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-4"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-2">
-                        <h3 className="font-display text-sm font-semibold text-slate-900">
-                          {item.title}
-                        </h3>
-                        <span className="font-mono text-xs text-slate-500 tabular-nums">
-                          {wordCount(item.text)} words
-                        </span>
+                ).map((item) => {
+                  const whatsappHref =
+                    item.channel === 'whatsapp'
+                      ? buildWhatsAppChatUrl(activeLead.phone, item.text)
+                      : null;
+
+                  return (
+                    <div
+                      key={item.key}
+                      className="flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-4"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="font-display text-sm font-semibold text-slate-900">
+                            {item.title}
+                          </h3>
+                          <span className="font-mono text-xs text-slate-500 tabular-nums">
+                            {wordCount(item.text)} words
+                          </span>
+                        </div>
+                        <p className="mt-0.5 text-[11px] text-slate-500">{item.limitNote}</p>
+                        <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+                          {item.text}
+                        </p>
                       </div>
-                      <p className="mt-0.5 text-[11px] text-slate-500">{item.limitNote}</p>
-                      <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
-                        {item.text}
-                      </p>
-                    </div>
-                    <div className="mt-4 flex justify-end border-t border-slate-100 pt-3">
-                      <button
-                        type="button"
-                        onClick={() => handleCopy(item.key, item.text)}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-                      >
-                        {copiedKey === item.key ? (
-                          <>
-                            <Check className="h-3.5 w-3.5 text-emerald-700" />
-                            <span>Copied</span>
-                          </>
-                        ) : (
-                          <>
-                            <Copy className="h-3.5 w-3.5" />
-                            <span>Copy Message</span>
-                          </>
+                      <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => handleCopy(item.key, item.text)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                        >
+                          {copiedKey === item.key ? (
+                            <>
+                              <Check className="h-3.5 w-3.5 text-emerald-700" />
+                              <span>Copied</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="h-3.5 w-3.5" />
+                              <span>Copy Message</span>
+                            </>
+                          )}
+                        </button>
+
+                        {whatsappHref && (
+                          <a
+                            href={whatsappHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md bg-emerald-800 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-900 whitespace-nowrap"
+                            title={
+                              activeWhatsAppDigits
+                                ? `Open WhatsApp chat with +${activeWhatsAppDigits} with this message prefilled`
+                                : 'Open WhatsApp with this message prefilled to pick a contact'
+                            }
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" />
+                            <span>Open in WhatsApp</span>
+                          </a>
                         )}
-                      </button>
+
+                        {item.channel === 'instagram' && activeLead.instagram_url && (
+                          <a
+                            href={activeLead.instagram_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-slate-800 whitespace-nowrap"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                            <span>Open Instagram</span>
+                          </a>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Image-Generation Brief */}

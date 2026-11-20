@@ -312,6 +312,28 @@ export default function App() {
     }
   };
 
+  const handleUpdateLeadPhone = async (id: string, phone: string | null) => {
+    setErrorBanner(null);
+    const targetLead = leads.find((l) => l.id === id);
+    const cleanedPhone = phone && phone.trim() ? phone.trim() : null;
+    setLeads((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, phone: cleanedPhone } : l))
+    );
+    try {
+      const res = await fetch(`/api/leads/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: cleanedPhone, lead: targetLead }),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      if (data.lead) {
+        setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+      }
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to update lead phone number.');
+    }
+  };
+
   const handleDeleteLead = async (id: string) => {
     setErrorBanner(null);
     setLeads((prev) => prev.filter((l) => l.id !== id));
@@ -644,6 +666,7 @@ export default function App() {
               onSelectLead={(id) => setSelectedLeadId(id)}
               onGenerateOutreach={handleGenerateOutreach}
               onUpdateLifecycle={handleUpdateLifecycle}
+              onUpdatePhone={handleUpdateLeadPhone}
             />
           ) : activeTab === 'replies' && packages ? (
             <ReplyHandlerView
