@@ -20,6 +20,7 @@ interface OutreachPreviewViewProps {
   onGenerateOutreach: (id: string) => Promise<void>;
   onUpdateLifecycle: (id: string, lifecycle: LeadLifecycleStatus) => Promise<void>;
   onUpdatePhone?: (id: string, phone: string | null) => Promise<void>;
+  onChangeDesignVariant?: (id: string, variantId: string) => Promise<void>;
 }
 
 function wordCount(text: string): number {
@@ -33,6 +34,7 @@ export function OutreachPreviewView({
   onGenerateOutreach,
   onUpdateLifecycle,
   onUpdatePhone,
+  onChangeDesignVariant,
 }: OutreachPreviewViewProps) {
   const [generating, setGenerating] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -471,7 +473,10 @@ export function OutreachPreviewView({
           )}
 
           {/* Always render the live interactive Concept Mockup Preview for the active qualified lead */}
-          <ConceptMockupPreview lead={activeLead} />
+          <ConceptMockupPreview
+            lead={activeLead}
+            onChangeDesignVariant={onChangeDesignVariant}
+          />
         </div>
       )}
     </div>

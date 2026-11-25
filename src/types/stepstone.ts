@@ -104,6 +104,7 @@ export interface LeadRecord extends ModeALeadRecord {
   search_state: string;
   lead_lifecycle: LeadLifecycleStatus;
   outreach: ModeBOutreachRecord | null;
+  mockup_variant_id?: string | null;
   http_signals?: {
     reachable: boolean;
     http_status: number | null;

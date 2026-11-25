@@ -23,6 +23,7 @@ import {
   type LeadRecord,
   type LocationSelection,
 } from './types/stepstone.ts';
+import { getNextMockupPresetId, resolveMockupPreset } from './utils/mockupDesigns.ts';
 
 type WorkspaceTab = 'discovery' | 'outreach' | 'replies' | 'packages';
 
@@ -273,6 +274,11 @@ export default function App() {
     setInfoNotice(null);
     try {
       const targetLead = leads.find((l) => l.id === id);
+      const nextVariantId = targetLead
+        ? targetLead.outreach
+          ? getNextMockupPresetId(resolveMockupPreset(targetLead).id)
+          : resolveMockupPreset(targetLead).id
+        : null;
       const res = await fetch(`/api/leads/${id}/outreach`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -285,7 +291,21 @@ export default function App() {
       if (data.quotaNotice) {
         setInfoNotice(data.quotaNotice);
       }
-      setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+      const updatedWithVariant: LeadRecord = {
+        ...data.lead,
+        mockup_variant_id: nextVariantId ?? data.lead.mockup_variant_id ?? null,
+      };
+      setLeads((prev) => prev.map((l) => (l.id === id ? updatedWithVariant : l)));
+      if (nextVariantId) {
+        void fetch(`/api/leads/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mockup_variant_id: nextVariantId,
+            lead: updatedWithVariant,
+          }),
+        });
+      }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to generate outreach.');
     }
@@ -331,6 +351,27 @@ export default function App() {
       }
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to update lead phone number.');
+    }
+  };
+
+  const handleUpdateMockupVariant = async (id: string, variantId: string) => {
+    setErrorBanner(null);
+    const targetLead = leads.find((l) => l.id === id);
+    setLeads((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, mockup_variant_id: variantId } : l))
+    );
+    try {
+      const res = await fetch(`/api/leads/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mockup_variant_id: variantId, lead: targetLead }),
+      });
+      const data = await parseApiResponse<{ lead: LeadRecord }>(res);
+      if (data.lead) {
+        setLeads((prev) => prev.map((l) => (l.id === id ? data.lead : l)));
+      }
+    } catch {
+      // Local design selection already applied
     }
   };
 
@@ -667,6 +708,7 @@ export default function App() {
               onGenerateOutreach={handleGenerateOutreach}
               onUpdateLifecycle={handleUpdateLifecycle}
               onUpdatePhone={handleUpdateLeadPhone}
+              onChangeDesignVariant={handleUpdateMockupVariant}
             />
           ) : activeTab === 'replies' && packages ? (
             <ReplyHandlerView

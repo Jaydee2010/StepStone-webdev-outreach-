@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Code2,
@@ -148,6 +148,10 @@ export function DiscoveryView({
     () => leads.find((l) => l.id === selectedLeadId) ?? null,
     [leads, selectedLeadId]
   );
+
+  useEffect(() => {
+    setOverrideUrl(selectedLead?.website_url ?? '');
+  }, [selectedLead?.id, selectedLead?.website_url]);
 
   const handleSearchClick = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -9,6 +9,7 @@ import type {
 import type { HttpInspectionReport } from './inspector.ts';
 import { inspectWebsiteUrl, normalizeUrlInput } from './inspector.ts';
 import { discoverFromFinelibDirectory, qualifyFromHttpEvidence } from './directory.ts';
+import { buildNoWebsiteProbeSummary, probeCompanyWebsiteFree } from './domainProbe.ts';
 import { buildPlaybookOutreachForLead, buildPlaybookReply } from './playbook.ts';
 
 export function isQuotaOrKeyFallbackError(err: unknown): boolean {
@@ -183,6 +184,9 @@ export interface RawDiscoveredCompany {
   google_business_profile_url: string | null;
   source_urls: string[];
   discovery_notes: string;
+  corporate_email_domains?: string[];
+  brand_email_handles?: string[];
+  text_domain_hints?: string[];
 }
 
 export async function discoverBusinessesWithSearch(params: {
@@ -531,7 +535,42 @@ export async function inspectAndQualifyBatch(
       let websiteUrl = raw.website_url;
       let instagramUrl = raw.instagram_url;
       let facebookUrl = raw.facebook_url;
+      let lookupNotes = raw.discovery_notes;
+      let allSources = [...raw.source_urls];
       let httpReport: HttpInspectionReport | null = null;
+
+      if (!websiteUrl) {
+        const probeMatch = await probeCompanyWebsiteFree({
+          business_name: raw.business_name,
+          state: raw.state,
+          city: raw.city,
+          phone: raw.phone,
+          corporateEmailDomains: raw.corporate_email_domains,
+          brandEmailHandles: raw.brand_email_handles,
+          textDomainHints: raw.text_domain_hints,
+        });
+        if (probeMatch) {
+          websiteUrl = probeMatch.websiteUrl;
+          if (!instagramUrl && probeMatch.discoveredInstagramUrl) {
+            instagramUrl = probeMatch.discoveredInstagramUrl;
+          }
+          if (!facebookUrl && probeMatch.discoveredFacebookUrl) {
+            facebookUrl = probeMatch.discoveredFacebookUrl;
+          }
+          allSources = Array.from(new Set([...allSources, ...probeMatch.sourceUrls]));
+          lookupNotes = [lookupNotes, probeMatch.factualNote].filter(Boolean).join(' ');
+        } else {
+          const hadEmailHints = Boolean(
+            (raw.corporate_email_domains?.length ?? 0) +
+              (raw.brand_email_handles?.length ?? 0) +
+              (raw.text_domain_hints?.length ?? 0) >
+              0
+          );
+          lookupNotes = [lookupNotes, buildNoWebsiteProbeSummary(raw.business_name, hadEmailHints)]
+            .filter(Boolean)
+            .join(' ');
+        }
+      }
 
       if (websiteUrl) {
         httpReport = await inspectWebsiteUrl(websiteUrl);
@@ -543,7 +582,7 @@ export async function inspectAndQualifyBatch(
           }
         }
       }
-      return { raw, websiteUrl, instagramUrl, facebookUrl, httpReport };
+      return { raw, websiteUrl, instagramUrl, facebookUrl, lookupNotes, allSources, httpReport };
     })
   );
 
@@ -554,15 +593,15 @@ export async function inspectAndQualifyBatch(
         websiteUrl: item.websiteUrl,
         instagramUrl: item.instagramUrl,
         facebookUrl: item.facebookUrl,
-        lookupNotes: item.raw.discovery_notes,
-        allSources: item.raw.source_urls,
+        lookupNotes: item.lookupNotes,
+        allSources: item.allSources,
         httpReport: item.httpReport,
         qualification: qualifyFromHttpEvidence({
           websiteUrl: item.websiteUrl,
           instagramUrl: item.instagramUrl,
           facebookUrl: item.facebookUrl,
           httpReport: item.httpReport,
-          lookupNotes: item.raw.discovery_notes,
+          lookupNotes: item.lookupNotes,
         }),
       })
     );
@@ -590,7 +629,7 @@ export async function inspectAndQualifyBatch(
       instagram_url: item.instagramUrl,
       facebook_url: item.facebookUrl,
       google_business_profile_url: item.raw.google_business_profile_url,
-      discovery_notes: item.raw.discovery_notes,
+      discovery_notes: item.lookupNotes,
       http_inspection_report:
         item.httpReport ?? 'No independent website URL discovered to inspect via HTTP.',
     }));
@@ -644,15 +683,15 @@ CLASSIFICATION RULES (choose exactly ONE per company):
           websiteUrl: item.websiteUrl,
           instagramUrl: item.instagramUrl,
           facebookUrl: item.facebookUrl,
-          lookupNotes: item.raw.discovery_notes,
-          allSources: item.raw.source_urls,
+          lookupNotes: item.lookupNotes,
+          allSources: item.allSources,
           httpReport: item.httpReport,
           qualification: qualifyFromHttpEvidence({
             websiteUrl: item.websiteUrl,
             instagramUrl: item.instagramUrl,
             facebookUrl: item.facebookUrl,
             httpReport: item.httpReport,
-            lookupNotes: item.raw.discovery_notes,
+            lookupNotes: item.lookupNotes,
           }),
         })
       );
@@ -667,8 +706,8 @@ CLASSIFICATION RULES (choose exactly ONE per company):
       websiteUrl: item.websiteUrl,
       instagramUrl: item.instagramUrl,
       facebookUrl: item.facebookUrl,
-      lookupNotes: item.raw.discovery_notes,
-      allSources: item.raw.source_urls,
+      lookupNotes: item.lookupNotes,
+      allSources: item.allSources,
       httpReport: item.httpReport,
       qualification: q,
     });
@@ -700,6 +739,39 @@ export async function inspectAndQualifyCandidate(
       allSources = Array.from(new Set([...allSources, ...lookup.source_urls]));
     } catch {
       // Keep original discovery details if secondary lookup fails
+    }
+  }
+
+  if (!websiteUrl) {
+    const probeMatch = await probeCompanyWebsiteFree({
+      business_name: raw.business_name,
+      state: raw.state,
+      city: raw.city,
+      phone: raw.phone,
+      corporateEmailDomains: raw.corporate_email_domains,
+      brandEmailHandles: raw.brand_email_handles,
+      textDomainHints: raw.text_domain_hints,
+    });
+    if (probeMatch) {
+      websiteUrl = probeMatch.websiteUrl;
+      if (!instagramUrl && probeMatch.discoveredInstagramUrl) {
+        instagramUrl = probeMatch.discoveredInstagramUrl;
+      }
+      if (!facebookUrl && probeMatch.discoveredFacebookUrl) {
+        facebookUrl = probeMatch.discoveredFacebookUrl;
+      }
+      allSources = Array.from(new Set([...allSources, ...probeMatch.sourceUrls]));
+      lookupNotes = [lookupNotes, probeMatch.factualNote].filter(Boolean).join(' ');
+    } else {
+      const hadEmailHints = Boolean(
+        (raw.corporate_email_domains?.length ?? 0) +
+          (raw.brand_email_handles?.length ?? 0) +
+          (raw.text_domain_hints?.length ?? 0) >
+          0
+      );
+      lookupNotes = [lookupNotes, buildNoWebsiteProbeSummary(raw.business_name, hadEmailHints)]
+        .filter(Boolean)
+        .join(' ');
     }
   }
 

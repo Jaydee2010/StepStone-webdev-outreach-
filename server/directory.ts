@@ -1,6 +1,7 @@
 import type { HttpInspectionReport } from './inspector.ts';
 import { normalizeUrlInput } from './inspector.ts';
 import type { RawDiscoveredCompany } from './gemini.ts';
+import { extractEmailHintsFromHtml, extractTextDomainsFromSnippet } from './domainProbe.ts';
 import { ALL_STATES_OPTION, NIGERIAN_STATES, type WebsiteClassification } from '../src/types/stepstone.ts';
 
 const FINELIB_BASE = 'https://www.finelib.com';
@@ -247,12 +248,22 @@ function parseFinelibListingPage(
   );
   const description = descMatch ? stripTags(descMatch[1]) : '';
 
+  const emailSectionMatch = mainBody.match(/E-mail Contact[\s\S]{0,600}/i);
+  const emailHints = extractEmailHintsFromHtml(emailSectionMatch ? emailSectionMatch[0] : mainBody);
+  const textDomainHints = extractTextDomainsFromSnippet(
+    `${description} ${street} ${stripTags(urlDivMatch?.[1] ?? '')}`
+  );
+
   if (!instagramUrl) {
-    const igMatch = mainBody.match(/https?:\/\/(?:www\.)?instagram\.com\/[A-Za-z0-9_.-]+\/?/i);
+    const igMatch = mainBody.match(
+      /https?:\/\/(?:www\.)?instagram\.com\/(?!p\/|reel\/|explore\/|share\b)([A-Za-z0-9_.-]+)\/?/i
+    );
     if (igMatch) instagramUrl = igMatch[0];
   }
   if (!facebookUrl) {
-    const fbMatch = mainBody.match(/https?:\/\/(?:www\.)?facebook\.com\/[A-Za-z0-9_.-]+\/?/i);
+    const fbMatch = mainBody.match(
+      /https?:\/\/(?:www\.)?(?:facebook|fb)\.com\/(?!sharer|share\.php|tr\b|plugins\b|finelib)([A-Za-z0-9_.-]+)\/?/i
+    );
     if (fbMatch && !/finelib/i.test(fbMatch[0])) facebookUrl = fbMatch[0];
   }
 
@@ -279,6 +290,9 @@ function parseFinelibListingPage(
     google_business_profile_url: null,
     source_urls: [listingUrl],
     discovery_notes: `Verified via Finelib Nigerian Business Directory${street ? ` (${street}${city ? `, ${city}` : ''})` : ''}.`,
+    corporate_email_domains: emailHints.corporateEmailDomains,
+    brand_email_handles: emailHints.brandEmailHandles,
+    text_domain_hints: textDomainHints,
   };
 }
 
@@ -461,10 +475,14 @@ export function qualifyFromHttpEvidence(params: {
     };
   }
 
+  const probeDiscoveryNote = lookupNotes.includes('Directory URL was blank;')
+    ? ` ${lookupNotes.slice(lookupNotes.indexOf('Directory URL was blank;'))}`
+    : '';
+
   if (httpReport.access_restricted) {
     return {
       website_status: 'unknown',
-      inspection_evidence: httpReport.factual_summary,
+      inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'Low',
       opportunity_score: 3,
       qualification_reason: `Server returned HTTP ${httpReport.http_status ?? 'WAF'} access restriction; requires manual browser check before outreach.`,
@@ -475,7 +493,7 @@ export function qualifyFromHttpEvidence(params: {
   if (!httpReport.reachable || (httpReport.http_status !== null && httpReport.http_status >= 400)) {
     return {
       website_status: 'broken_website',
-      inspection_evidence: httpReport.factual_summary,
+      inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'High',
       opportunity_score: 5,
       qualification_reason: `Listed website (${websiteUrl}) failed live HTTP check (${httpReport.error_message || `HTTP ${httpReport.http_status}`}).`,
@@ -487,7 +505,7 @@ export function qualifyFromHttpEvidence(params: {
   if (!sig) {
     return {
       website_status: 'unknown',
-      inspection_evidence: httpReport.factual_summary,
+      inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'Low',
       opportunity_score: 3,
       qualification_reason: 'Site responded without parsable HTML signals.',
@@ -506,7 +524,7 @@ export function qualifyFromHttpEvidence(params: {
   if (weaknesses.length >= 2 || !sig.has_viewport_meta || !httpReport.is_https) {
     return {
       website_status: 'weak_website',
-      inspection_evidence: httpReport.factual_summary,
+      inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'High',
       opportunity_score: weaknesses.length >= 3 ? 4 : 3,
       qualification_reason: `Live website reachable (HTTP ${httpReport.http_status}) but shows clear gaps: ${weaknesses.join(', ')}.`,
@@ -517,7 +535,7 @@ export function qualifyFromHttpEvidence(params: {
   if (weaknesses.length === 1) {
     return {
       website_status: 'weak_website',
-      inspection_evidence: httpReport.factual_summary,
+      inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'High',
       opportunity_score: 3,
       qualification_reason: `Live website reachable (HTTP ${httpReport.http_status}) with opportunity to improve (${weaknesses[0]}).`,
@@ -527,7 +545,7 @@ export function qualifyFromHttpEvidence(params: {
 
   return {
     website_status: 'good_website',
-    inspection_evidence: httpReport.factual_summary,
+    inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
     confidence: 'High',
     opportunity_score: 1,
     qualification_reason: `Live HTTPS website verified (HTTP ${httpReport.http_status}) with mobile viewport, navigation, contact details, and inquiry channel.`,

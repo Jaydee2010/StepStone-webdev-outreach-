@@ -375,14 +375,21 @@ export function createApiRouter(): express.Router {
   // Update lead lifecycle or editable contact fields
   router.patch('/leads/:id', (req, res) => {
     const { id } = req.params;
-    const { lead_lifecycle, phone, instagram_url, facebook_url, lead: clientLead } =
-      req.body as {
-        lead_lifecycle?: LeadLifecycleStatus;
-        phone?: string | null;
-        instagram_url?: string | null;
-        facebook_url?: string | null;
-        lead?: LeadRecord;
-      };
+    const {
+      lead_lifecycle,
+      phone,
+      instagram_url,
+      facebook_url,
+      mockup_variant_id,
+      lead: clientLead,
+    } = req.body as {
+      lead_lifecycle?: LeadLifecycleStatus;
+      phone?: string | null;
+      instagram_url?: string | null;
+      facebook_url?: string | null;
+      mockup_variant_id?: string | null;
+      lead?: LeadRecord;
+    };
     const db = readDb();
     const idx = db.leads.findIndex((l) => l.id === id);
     const current = idx !== -1 ? db.leads[idx] : clientLead;
@@ -395,6 +402,8 @@ export function createApiRouter(): express.Router {
       phone: phone !== undefined ? phone : current.phone,
       instagram_url: instagram_url !== undefined ? instagram_url : current.instagram_url,
       facebook_url: facebook_url !== undefined ? facebook_url : current.facebook_url,
+      mockup_variant_id:
+        mockup_variant_id !== undefined ? mockup_variant_id : current.mockup_variant_id,
     };
     if (idx !== -1) {
       db.leads[idx] = updated;

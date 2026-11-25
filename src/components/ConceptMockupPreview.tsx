@@ -1,472 +1,62 @@
-import React, { useState } from 'react';
-import { Building2, Download, MapPin, MessageCircle, Phone, Smartphone } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  Building2,
+  Download,
+  MapPin,
+  MessageCircle,
+  Phone,
+  Search,
+  Shuffle,
+  Smartphone,
+} from 'lucide-react';
 import type { LeadRecord } from '../types/stepstone.ts';
-import heroPropertyImg from '../assets/images/abuja_luxury_estate_hero_1794939921294.jpg';
-import secondaryPropertyImg from '../assets/images/lagos_modern_residences_1794939921771.jpg';
+import {
+  getDomainTailoredCopy,
+  getNextMockupPresetId,
+  resolveMockupPreset,
+} from '../utils/mockupDesigns.ts';
+import {
+  exportDesktopAndMobileMockupPng,
+  exportMobileOnlyMockupPng,
+} from '../utils/mockupCanvas.ts';
 
-function loadImage(src: string): Promise<HTMLImageElement | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
-    img.src = src;
-  });
+interface ConceptMockupPreviewProps {
+  lead: LeadRecord;
+  onChangeDesignVariant?: (id: string, variantId: string) => Promise<void> | void;
 }
 
-function roundedRectPath(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number
-) {
-  const radius = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + w - radius, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
-  ctx.lineTo(x + w, y + h - radius);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
-  ctx.lineTo(x + radius, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
-  ctx.lineTo(x, y + radius);
-  ctx.quadraticCurveTo(x, y, x + radius, y);
-  ctx.closePath();
-}
-
-function drawCoverImage(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement | null,
-  x: number,
-  y: number,
-  w: number,
-  h: number
-) {
-  if (!img || !img.naturalWidth || !img.naturalHeight) {
-    const grad = ctx.createLinearGradient(x, y, x + w, y + h);
-    grad.addColorStop(0, '#1e293b');
-    grad.addColorStop(1, '#064e3b');
-    ctx.fillStyle = grad;
-    ctx.fillRect(x, y, w, h);
-    return;
-  }
-  const imgRatio = img.naturalWidth / img.naturalHeight;
-  const boxRatio = w / h;
-  let sx = 0;
-  let sy = 0;
-  let sw = img.naturalWidth;
-  let sh = img.naturalHeight;
-  if (imgRatio > boxRatio) {
-    sw = img.naturalHeight * boxRatio;
-    sx = (img.naturalWidth - sw) / 2;
-  } else {
-    sh = img.naturalWidth / boxRatio;
-    sy = (img.naturalHeight - sh) / 2;
-  }
-  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h);
-}
-
-function drawWrappedText(
-  ctx: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineHeight: number,
-  maxLines = 3
-): number {
-  const words = text.trim().split(/\s+/);
-  let line = '';
-  let currentY = y;
-  let linesDrawn = 0;
-
-  for (let i = 0; i < words.length; i++) {
-    const testLine = line ? `${line} ${words[i]}` : words[i];
-    if (ctx.measureText(testLine).width > maxWidth && line) {
-      linesDrawn++;
-      if (linesDrawn >= maxLines) {
-        let truncated = line;
-        while (
-          truncated.length > 3 &&
-          ctx.measureText(`${truncated}…`).width > maxWidth
-        ) {
-          truncated = truncated.slice(0, -1);
-        }
-        ctx.fillText(`${truncated}…`, x, currentY);
-        return currentY + lineHeight;
-      }
-      ctx.fillText(line, x, currentY);
-      line = words[i];
-      currentY += lineHeight;
-    } else {
-      line = testLine;
-    }
-  }
-  if (line) {
-    ctx.fillText(line, x, currentY);
-    currentY += lineHeight;
-  }
-  return currentY;
-}
-
-function triggerPngDownload(canvas: HTMLCanvasElement, filename: string) {
-  const link = document.createElement('a');
-  link.download = filename;
-  link.href = canvas.toDataURL('image/png');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-function slugifyName(name: string): string {
-  return (
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '') || 'stepstone-prospect'
-  );
-}
-
-async function renderDesktopAndMobilePng(lead: LeadRecord) {
-  const locationLabel = lead.city ? `${lead.city}, ${lead.state}` : lead.state;
-  const [heroImg, secondaryImg] = await Promise.all([
-    loadImage(heroPropertyImg),
-    loadImage(secondaryPropertyImg),
-  ]);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = 1600;
-  canvas.height = 960;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas 2D context is unavailable.');
-
-  // Background
-  ctx.fillStyle = '#f1f5f9';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Header caption
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 22px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(`Concept Homepage Preview — ${lead.business_name}`, 48, 46);
-  ctx.fillStyle = '#64748b';
-  ctx.font = '400 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(
-    `Illustrative design concept by Stepstone Web Agency · ${locationLabel}`,
-    48,
-    70
-  );
-
-  // --- DESKTOP BROWSER CARD ---
-  const dx = 48;
-  const dy = 96;
-  const dw = 1020;
-  const dh = 816;
-
-  ctx.save();
-  roundedRectPath(ctx, dx, dy, dw, dh, 16);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#cbd5e1';
-  ctx.stroke();
-  ctx.clip();
-
-  // Browser bar
-  ctx.fillStyle = '#f8fafc';
-  ctx.fillRect(dx, dy, dw, 46);
-  ctx.fillStyle = '#e2e8f0';
-  ctx.fillRect(dx, dy + 45, dw, 1);
-
-  ctx.fillStyle = '#334155';
-  ctx.font = '600 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(lead.business_name, dx + 24, dy + 29);
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '500 13px ui-monospace, SFMono-Regular, Menlo, monospace';
-  const badgeText = 'Concept Preview';
-  ctx.fillText(badgeText, dx + dw - 24 - ctx.measureText(badgeText).width, dy + 29);
-
-  // Site navbar
-  const navY = dy + 46;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(dx, navY, dw, 66);
-  ctx.fillStyle = '#f1f5f9';
-  ctx.fillRect(dx, navY + 65, dw, 1);
-
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 20px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(lead.business_name.slice(0, 32), dx + 32, navY + 40);
-
-  ctx.fillStyle = '#475569';
-  ctx.font = '500 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  const navLinks = ['Properties', 'Estates', 'About', 'Contact'];
-  let nx = dx + 520;
-  for (const link of navLinks) {
-    ctx.fillText(link, nx, navY + 39);
-    nx += ctx.measureText(link).width + 32;
-  }
-
-  // WhatsApp button
-  roundedRectPath(ctx, dx + dw - 148, navY + 15, 116, 36, 8);
-  ctx.fillStyle = '#065f46';
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '600 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('WhatsApp', dx + dw - 122, navY + 38);
-
-  // Hero section
-  const heroY = navY + 66;
-  const heroH = 355;
-  drawCoverImage(ctx, heroImg, dx, heroY, dw, heroH);
-  const heroGrad = ctx.createLinearGradient(0, heroY, 0, heroY + heroH);
-  heroGrad.addColorStop(0, 'rgba(2, 6, 23, 0.15)');
-  heroGrad.addColorStop(0.55, 'rgba(2, 6, 23, 0.55)');
-  heroGrad.addColorStop(1, 'rgba(2, 6, 23, 0.90)');
-  ctx.fillStyle = heroGrad;
-  ctx.fillRect(dx, heroY, dw, heroH);
-
-  ctx.fillStyle = '#6ee7b7';
-  ctx.font = '600 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(`${lead.business_category} · ${locationLabel}`, dx + 36, heroY + 195);
-
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '700 32px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  drawWrappedText(
-    ctx,
-    `Verified Properties & Developments in ${locationLabel}`,
-    dx + 36,
-    heroY + 238,
-    720,
-    40,
-    2
-  );
-
-  // Hero CTAs
-  roundedRectPath(ctx, dx + 36, heroY + 292, 162, 42, 8);
-  ctx.fillStyle = '#047857';
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '600 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('Explore Listings', dx + 58, heroY + 318);
-
-  roundedRectPath(ctx, dx + 214, heroY + 292, 168, 42, 8);
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.14)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText('Book Inspection', dx + 240, heroY + 318);
-
-  // Bottom 2 cards
-  const gridY = heroY + heroH + 28;
-  const cardW = (dw - 64 - 24) / 2;
-  const cardH = 290;
-
-  // Left Property Card
-  const c1x = dx + 32;
-  ctx.save();
-  roundedRectPath(ctx, c1x, gridY, cardW, cardH, 12);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.clip();
-  drawCoverImage(ctx, secondaryImg, c1x, gridY, cardW, 180);
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 17px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('Featured Residential Portfolio', c1x + 20, gridY + 216);
-  ctx.fillStyle = '#64748b';
-  ctx.font = '400 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  drawWrappedText(
-    ctx,
-    `Direct inquiry & inspection scheduling · ${locationLabel}`,
-    c1x + 20,
-    gridY + 244,
-    cardW - 40,
-    20,
-    2
-  );
-  ctx.restore();
-
-  // Right Inquiry Card
-  const c2x = c1x + cardW + 24;
-  roundedRectPath(ctx, c2x, gridY, cardW, cardH, 12);
-  ctx.fillStyle = '#f8fafc';
-  ctx.fill();
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 18px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('Direct Buyer Inquiry Channel', c2x + 24, gridY + 44);
-  ctx.fillStyle = '#475569';
-  ctx.font = '400 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  drawWrappedText(
-    ctx,
-    'Give prospective buyers a dedicated place to browse properties, verify office details, and send instant WhatsApp inquiries.',
-    c2x + 24,
-    gridY + 78,
-    cardW - 48,
-    24,
-    4
-  );
-  ctx.fillStyle = '#065f46';
-  ctx.font = '600 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(`Location: ${locationLabel}`, c2x + 24, gridY + 225);
-  if (lead.phone) {
-    ctx.fillStyle = '#334155';
-    ctx.font = '500 14px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillText(`Tel: ${lead.phone}`, c2x + 24, gridY + 252);
-  }
-  ctx.restore();
-
-  // --- MOBILE PORTRAIT FRAME ---
-  drawMobileFrame(ctx, lead, heroImg, 1112, 96, 440, 816);
-
-  triggerPngDownload(canvas, `${slugifyName(lead.business_name)}-concept-mockup.png`);
-}
-
-function drawMobileFrame(
-  ctx: CanvasRenderingContext2D,
-  lead: LeadRecord,
-  heroImg: HTMLImageElement | null,
-  mx: number,
-  my: number,
-  mw: number,
-  mh: number
-) {
-  const locationLabel = lead.city ? `${lead.city}, ${lead.state}` : lead.state;
-  ctx.save();
-  roundedRectPath(ctx, mx, my, mw, mh, 32);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = '#1e293b';
-  ctx.stroke();
-  ctx.clip();
-
-  // Mobile header
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(mx, my, mw, 60);
-  ctx.fillStyle = '#f1f5f9';
-  ctx.fillRect(mx, my + 59, mw, 1);
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 17px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(lead.business_name.slice(0, 24), mx + 24, my + 38);
-  ctx.fillStyle = '#065f46';
-  ctx.font = '600 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('Menu', mx + mw - 64, my + 38);
-
-  // Mobile hero
-  const mHeroY = my + 60;
-  const mHeroH = 310;
-  drawCoverImage(ctx, heroImg, mx, mHeroY, mw, mHeroH);
-  const grad = ctx.createLinearGradient(0, mHeroY, 0, mHeroY + mHeroH);
-  grad.addColorStop(0, 'rgba(2, 6, 23, 0.15)');
-  grad.addColorStop(1, 'rgba(2, 6, 23, 0.92)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(mx, mHeroY, mw, mHeroH);
-
-  ctx.fillStyle = '#6ee7b7';
-  ctx.font = '600 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText(locationLabel, mx + 24, mHeroY + 205);
-
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '700 24px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  drawWrappedText(
-    ctx,
-    `Trusted Real Estate in ${lead.state}`,
-    mx + 24,
-    mHeroY + 240,
-    mw - 48,
-    30,
-    2
-  );
-
-  // Mobile body cards
-  const bodyY = mHeroY + mHeroH + 24;
-  roundedRectPath(ctx, mx + 24, bodyY, mw - 48, 128, 12);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  ctx.fillStyle = '#0f172a';
-  ctx.font = '700 17px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  ctx.fillText('Property Showcase', mx + 44, bodyY + 38);
-  ctx.fillStyle = '#64748b';
-  ctx.font = '400 15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  drawWrappedText(
-    ctx,
-    'Clean mobile browsing for plots, terraces, and residential estates with instant inspection booking.',
-    mx + 44,
-    bodyY + 68,
-    mw - 88,
-    22,
-    3
-  );
-
-  if (lead.phone) {
-    ctx.fillStyle = '#334155';
-    ctx.font = '500 14px ui-monospace, SFMono-Regular, Menlo, monospace';
-    ctx.fillText(`Office Line: ${lead.phone}`, mx + 24, bodyY + 170);
-  }
-
-  // WhatsApp button
-  const btnY = my + mh - 118;
-  roundedRectPath(ctx, mx + 24, btnY, mw - 48, 54, 10);
-  ctx.fillStyle = '#065f46';
-  ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '600 17px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  const waLabel = 'Chat on WhatsApp';
-  ctx.fillText(waLabel, mx + (mw - ctx.measureText(waLabel).width) / 2, btnY + 33);
-
-  // Footer caption
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '500 12px ui-monospace, SFMono-Regular, Menlo, monospace';
-  const foot = 'Concept Preview · Stepstone Web Agency';
-  ctx.fillText(foot, mx + (mw - ctx.measureText(foot).width) / 2, my + mh - 28);
-  ctx.restore();
-}
-
-async function renderMobileOnlyPng(lead: LeadRecord) {
-  const heroImg = await loadImage(heroPropertyImg);
-  const canvas = document.createElement('canvas');
-  canvas.width = 640;
-  canvas.height = 1040;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas 2D context is unavailable.');
-
-  ctx.fillStyle = '#f1f5f9';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.fillStyle = '#334155';
-  ctx.font = '600 16px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-  const title = `Concept Preview — ${lead.business_name}`;
-  ctx.fillText(title.slice(0, 48), 64, 48);
-
-  drawMobileFrame(ctx, lead, heroImg, 64, 72, 512, 910);
-  triggerPngDownload(canvas, `${slugifyName(lead.business_name)}-mobile-concept.png`);
-}
-
-export function ConceptMockupPreview({ lead }: { lead: LeadRecord }) {
+export function ConceptMockupPreview({
+  lead,
+  onChangeDesignVariant,
+}: ConceptMockupPreviewProps) {
   const [heroError, setHeroError] = useState(false);
   const [secondaryError, setSecondaryError] = useState(false);
+  const [tertiaryError, setTertiaryError] = useState(false);
   const [downloading, setDownloading] = useState<'full' | 'mobile' | null>(null);
 
+  const preset = resolveMockupPreset(lead);
+  const copy = getDomainTailoredCopy(lead, preset.layout);
+  const p = preset.palette;
   const locationLabel = lead.city ? `${lead.city}, ${lead.state}` : lead.state;
+  const isDarkHeader = p.id === 'navy_gold';
+
+  useEffect(() => {
+    setHeroError(false);
+    setSecondaryError(false);
+    setTertiaryError(false);
+  }, [lead.id, preset.id]);
+
+  const handleCycleDesign = async () => {
+    if (!onChangeDesignVariant) return;
+    const nextId = getNextMockupPresetId(preset.id);
+    await onChangeDesignVariant(lead.id, nextId);
+  };
 
   const handleDownloadFull = async () => {
     if (downloading) return;
     setDownloading('full');
     try {
-      await renderDesktopAndMobilePng(lead);
+      await exportDesktopAndMobileMockupPng(lead, preset, copy);
     } finally {
       setDownloading(null);
     }
@@ -476,11 +66,51 @@ export function ConceptMockupPreview({ lead }: { lead: LeadRecord }) {
     if (downloading) return;
     setDownloading('mobile');
     try {
-      await renderMobileOnlyPng(lead);
+      await exportMobileOnlyMockupPng(lead, preset, copy);
     } finally {
       setDownloading(null);
     }
   };
+
+  const renderHeader = (centered = false) => (
+    <div
+      className={`flex items-center justify-between border-b px-6 py-3.5 ${p.headerBgClass} ${
+        isDarkHeader ? 'border-white/10' : p.borderClass
+      }`}
+    >
+      {centered ? (
+        <>
+          <div className={`hidden sm:flex items-center gap-4 text-xs font-medium ${isDarkHeader ? 'text-slate-300' : p.mutedInkClass}`}>
+            <span>Properties</span>
+            <span>Estates</span>
+          </div>
+          <span className={`font-serif text-base font-bold tracking-tight ${isDarkHeader ? 'text-white' : p.inkClass}`}>
+            {lead.business_name}
+          </span>
+          <span className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium ${p.btnPrimaryClass}`}>
+            <MessageCircle className="h-3 w-3" />
+            <span>WhatsApp</span>
+          </span>
+        </>
+      ) : (
+        <>
+          <span className={`font-display text-sm font-bold tracking-tight ${isDarkHeader ? 'text-white' : p.inkClass}`}>
+            {lead.business_name}
+          </span>
+          <div className={`hidden sm:flex items-center gap-5 text-xs font-medium ${isDarkHeader ? 'text-slate-300' : p.mutedInkClass}`}>
+            <span>Properties</span>
+            <span>Estates</span>
+            <span>About</span>
+            <span>Contact</span>
+          </div>
+          <span className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium ${p.btnPrimaryClass}`}>
+            <MessageCircle className="h-3 w-3" />
+            <span>WhatsApp</span>
+          </span>
+        </>
+      )}
+    </div>
+  );
 
   return (
     <div className="rounded-xl border border-slate-200 bg-slate-100/70 p-5">
@@ -490,11 +120,21 @@ export function ConceptMockupPreview({ lead }: { lead: LeadRecord }) {
             Concept Homepage Preview — {lead.business_name}
           </p>
           <p className="text-xs text-slate-500">
-            Presented strictly as an illustrative design concept for {lead.business_name}, not an existing live website.
+            Style: <strong className="font-medium text-slate-700">{preset.layoutLabel}</strong> ({p.label}) · Illustrative concept only, not a live site.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onChangeDesignVariant && (
+            <button
+              type="button"
+              onClick={handleCycleDesign}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 whitespace-nowrap"
+            >
+              <Shuffle className="h-3.5 w-3.5" />
+              <span>Try Another Design</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleDownloadMobile}
@@ -519,154 +159,522 @@ export function ConceptMockupPreview({ lead }: { lead: LeadRecord }) {
       {/* Desktop + Mobile Presentation */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
         {/* Desktop Browser Frame */}
-        <div className="lg:col-span-8 overflow-hidden rounded-lg border border-slate-300 bg-white shadow-sm">
+        <div className={`lg:col-span-8 overflow-hidden rounded-lg border border-slate-300 shadow-sm ${p.surfaceClass}`}>
           <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2 text-xs text-slate-500">
             <span className="font-medium text-slate-700 truncate">{lead.business_name}</span>
-            <span className="font-mono text-[11px] text-slate-400">Concept Preview</span>
-          </div>
-
-          {/* Concept Navbar */}
-          <div className="flex items-center justify-between border-b border-slate-100 px-6 py-3.5">
-            <span className="font-display text-sm font-bold tracking-tight text-slate-900">
-              {lead.business_name}
-            </span>
-            <div className="hidden sm:flex items-center gap-5 text-xs font-medium text-slate-600">
-              <span>Properties</span>
-              <span>Estates</span>
-              <span>About</span>
-              <span>Contact</span>
-            </div>
-            <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-800 px-3 py-1.5 text-[11px] font-medium text-white">
-              <MessageCircle className="h-3 w-3" />
-              <span>WhatsApp</span>
+            <span className="font-mono text-[11px] text-slate-400">
+              {preset.layoutLabel} · Concept Preview
             </span>
           </div>
 
-          {/* Concept Hero */}
-          <div className="relative h-60 w-full overflow-hidden bg-slate-900">
-            {!heroError ? (
-              <img
-                src={heroPropertyImg}
-                alt={`Nigerian residential property concept for ${lead.business_name}`}
-                referrerPolicy="no-referrer"
-                onError={() => setHeroError(true)}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-800 to-emerald-950 text-slate-300">
-                <Building2 className="h-10 w-10" />
-              </div>
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/40 to-transparent" />
-            <div className="absolute inset-x-0 bottom-0 p-6 text-white">
-              <p className="text-[11px] font-medium text-emerald-300">
-                {lead.business_category} · {locationLabel}
-              </p>
-              <h4 className="mt-1 max-w-lg font-display text-xl font-semibold leading-snug">
-                Verified Properties & Developments in {locationLabel}
-              </h4>
-              <div className="mt-3 flex items-center gap-3">
-                <span className="rounded-md bg-emerald-700 px-3.5 py-1.5 text-xs font-medium text-white">
-                  Explore Listings
-                </span>
-                <span className="rounded-md border border-white/40 bg-white/10 px-3.5 py-1.5 text-xs font-medium text-white backdrop-blur-sm">
-                  Book Inspection
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Concept Property Showcase Section */}
-          <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
-            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-              <div className="h-28 w-full bg-slate-200">
-                {!secondaryError ? (
-                  <img
-                    src={secondaryPropertyImg}
-                    alt="Contemporary Nigerian residence showcase"
-                    referrerPolicy="no-referrer"
-                    onError={() => setSecondaryError(true)}
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <div className="flex h-full items-center justify-center text-slate-400">
-                    <Building2 className="h-6 w-6" />
-                  </div>
-                )}
-              </div>
-              <div className="p-3">
-                <p className="text-xs font-semibold text-slate-900">
-                  Featured Residential Portfolio
-                </p>
-                <p className="mt-0.5 text-[11px] text-slate-500">
-                  Direct inquiry & inspection scheduling · {locationLabel}
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-col justify-between rounded-lg border border-slate-200 bg-slate-50 p-4">
-              <div>
-                <p className="text-xs font-semibold text-slate-900">
-                  Direct Buyer Inquiry Channel
-                </p>
-                <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
-                  Give prospective buyers a dedicated place to browse properties, verify office details, and send instant WhatsApp inquiries.
-                </p>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
-                <span className="inline-flex items-center gap-1">
-                  <MapPin className="h-3 w-3 text-emerald-700" />
-                  {locationLabel}
-                </span>
-                {lead.phone && (
-                  <span className="inline-flex items-center gap-1 font-mono">
-                    <Phone className="h-3 w-3 text-emerald-700" />
-                    {lead.phone}
+          {preset.layout === 'executive_sidebar' ? (
+            <div className="grid grid-cols-1 sm:grid-cols-12">
+              {/* Left Architectural Sidebar */}
+              <div className={`sm:col-span-4 flex flex-col justify-between p-5 text-white ${p.bandBgClass}`}>
+                <div>
+                  <p className="font-display text-base font-bold leading-snug">
+                    {lead.business_name}
+                  </p>
+                  <p className={`mt-1 text-[11px] font-medium ${p.softAccentTextClass}`}>
+                    {locationLabel}
+                  </p>
+                  <ul className="mt-6 space-y-2.5 text-xs text-slate-300">
+                    <li className="font-semibold text-white">Overview</li>
+                    <li>Featured Estates</li>
+                    <li>Property Search</li>
+                    <li>Book Inspection</li>
+                    <li>Office Contact</li>
+                  </ul>
+                </div>
+                <div className="mt-6 space-y-2 border-t border-white/10 pt-4">
+                  <span className={`flex w-full items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium ${p.btnPrimaryClass}`}>
+                    <MessageCircle className="h-3.5 w-3.5" />
+                    <span>WhatsApp Desk</span>
                   </span>
-                )}
+                  {lead.phone && (
+                    <p className="font-mono text-[10px] text-slate-300">{lead.phone}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Right Main Showcase */}
+              <div className="sm:col-span-8">
+                <div className="relative h-56 w-full overflow-hidden bg-slate-900">
+                  {!heroError ? (
+                    <img
+                      src={preset.heroImg}
+                      alt={`Property showcase for ${lead.business_name}`}
+                      referrerPolicy="no-referrer"
+                      onError={() => setHeroError(true)}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-slate-300">
+                      <Building2 className="h-10 w-10" />
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/35 to-transparent" />
+                  <div className="absolute inset-x-0 bottom-0 p-5 text-white">
+                    <p className={`text-[11px] font-medium ${p.softAccentTextClass}`}>
+                      {copy.eyebrow}
+                    </p>
+                    <h4 className="mt-1 font-display text-lg font-semibold leading-snug">
+                      {copy.headline}
+                    </h4>
+                    <div className="mt-3">
+                      <span className={`inline-block rounded-md px-3 py-1.5 text-xs font-medium ${p.btnPrimaryClass}`}>
+                        {copy.primaryCta}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2">
+                  {[
+                    {
+                      img: preset.secondaryImg,
+                      err: secondaryError,
+                      onErr: () => setSecondaryError(true),
+                      title: copy.cardOneTitle,
+                      desc: copy.cardOneDesc,
+                    },
+                    {
+                      img: preset.tertiaryImg,
+                      err: tertiaryError,
+                      onErr: () => setTertiaryError(true),
+                      title: copy.cardTwoTitle,
+                      desc: copy.cardTwoDesc,
+                    },
+                  ].map((c, idx) => (
+                    <div key={idx} className={`overflow-hidden rounded-lg border bg-white ${p.borderClass}`}>
+                      <div className="h-24 bg-slate-200">
+                        {!c.err ? (
+                          <img
+                            src={c.img}
+                            alt={c.title}
+                            referrerPolicy="no-referrer"
+                            onError={c.onErr}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center text-slate-400">
+                            <Building2 className="h-6 w-6" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-3">
+                        <p className={`text-xs font-semibold ${p.inkClass}`}>{c.title}</p>
+                        <p className={`mt-0.5 text-[11px] ${p.mutedInkClass}`}>{c.desc}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <>
+              {renderHeader(preset.layout === 'minimal_framed')}
+
+              {preset.layout === 'editorial_split' && (
+                <>
+                  <div className="grid grid-cols-1 gap-5 bg-white p-6 sm:grid-cols-12 items-center">
+                    <div className="sm:col-span-6 space-y-3">
+                      <p className={`text-[11px] font-semibold ${p.accentTextClass}`}>
+                        {copy.eyebrow}
+                      </p>
+                      <h4 className={`font-serif text-xl font-bold leading-snug ${p.inkClass}`}>
+                        {copy.headline}
+                      </h4>
+                      <p className={`text-xs leading-relaxed ${p.mutedInkClass}`}>
+                        {copy.subheadline}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                        <span className={`rounded-md px-3.5 py-1.5 text-xs font-medium ${p.btnPrimaryClass}`}>
+                          {copy.primaryCta}
+                        </span>
+                        <span className={`rounded-md px-3.5 py-1.5 text-xs font-medium ${p.btnSecondaryClass}`}>
+                          {copy.secondaryCta}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="sm:col-span-6 h-52 overflow-hidden rounded-xl bg-slate-200">
+                      {!heroError ? (
+                        <img
+                          src={preset.heroImg}
+                          alt={`Editorial property concept for ${lead.business_name}`}
+                          referrerPolicy="no-referrer"
+                          onError={() => setHeroError(true)}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-slate-400">
+                          <Building2 className="h-8 w-8" />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3.5 p-5 sm:grid-cols-3">
+                    <div className={`overflow-hidden rounded-lg border bg-white ${p.borderClass}`}>
+                      <div className="h-24 bg-slate-200">
+                        {!secondaryError && (
+                          <img
+                            src={preset.secondaryImg}
+                            alt={copy.cardOneTitle}
+                            referrerPolicy="no-referrer"
+                            onError={() => setSecondaryError(true)}
+                            className="h-full w-full object-cover"
+                          />
+                        )}
+                      </div>
+                      <div className="p-3">
+                        <p className={`text-xs font-semibold ${p.inkClass}`}>{copy.cardOneTitle}</p>
+                        <p className={`mt-0.5 text-[11px] ${p.mutedInkClass}`}>{copy.cardOneDesc}</p>
+                      </div>
+                    </div>
+
+                    <div className={`overflow-hidden rounded-lg border bg-white ${p.borderClass}`}>
+                      <div className="h-24 bg-slate-200">
+                        {!tertiaryError && (
+                          <img
+                            src={preset.tertiaryImg}
+                            alt={copy.cardTwoTitle}
+                            referrerPolicy="no-referrer"
+                            onError={() => setTertiaryError(true)}
+                            className="h-full w-full object-cover"
+                          />
+                        )}
+                      </div>
+                      <div className="p-3">
+                        <p className={`text-xs font-semibold ${p.inkClass}`}>{copy.cardTwoTitle}</p>
+                        <p className={`mt-0.5 text-[11px] ${p.mutedInkClass}`}>{copy.cardTwoDesc}</p>
+                      </div>
+                    </div>
+
+                    <div className={`flex flex-col justify-between rounded-lg p-4 text-white ${p.bandBgClass}`}>
+                      <div>
+                        <p className={`text-[10px] font-medium ${p.softAccentTextClass}`}>
+                          {locationLabel}
+                        </p>
+                        <p className="mt-1 text-xs font-semibold">{copy.cardThreeTitle}</p>
+                        <p className="mt-1 text-[11px] text-slate-300">{copy.cardThreeDesc}</p>
+                      </div>
+                      {lead.phone && (
+                        <p className="mt-3 font-mono text-[11px] text-white">Tel: {lead.phone}</p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {preset.layout === 'minimal_framed' && (
+                <div className="p-5 space-y-4">
+                  <div className="relative h-56 overflow-hidden rounded-xl bg-slate-900">
+                    {!heroError ? (
+                      <img
+                        src={preset.heroImg}
+                        alt={`Minimal framed residence for ${lead.business_name}`}
+                        referrerPolicy="no-referrer"
+                        onError={() => setHeroError(true)}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full items-center justify-center text-slate-300">
+                        <Building2 className="h-10 w-10" />
+                      </div>
+                    )}
+                    <div className="absolute inset-0 bg-gradient-to-t from-slate-950/75 via-slate-950/15 to-transparent" />
+                    <div className="absolute inset-x-4 bottom-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+                      <div className="max-w-md rounded-lg bg-white/95 p-3.5 shadow-sm backdrop-blur-sm">
+                        <p className={`text-[10px] font-semibold ${p.accentTextClass}`}>
+                          {copy.eyebrow}
+                        </p>
+                        <h4 className={`mt-0.5 font-serif text-base font-bold leading-snug ${p.inkClass}`}>
+                          {copy.headline}
+                        </h4>
+                      </div>
+                      <span className={`inline-block rounded-md px-3.5 py-2 text-xs font-medium shrink-0 ${p.btnPrimaryClass}`}>
+                        {copy.primaryCta}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    {[
+                      {
+                        img: preset.secondaryImg,
+                        err: secondaryError,
+                        onErr: () => setSecondaryError(true),
+                        title: copy.cardOneTitle,
+                        desc: copy.cardOneDesc,
+                      },
+                      {
+                        img: preset.tertiaryImg,
+                        err: tertiaryError,
+                        onErr: () => setTertiaryError(true),
+                        title: copy.cardTwoTitle,
+                        desc: copy.cardTwoDesc,
+                      },
+                    ].map((c, idx) => (
+                      <div
+                        key={idx}
+                        className={`flex overflow-hidden rounded-lg border bg-white ${p.borderClass}`}
+                      >
+                        <div className="w-28 shrink-0 bg-slate-200">
+                          {!c.err && (
+                            <img
+                              src={c.img}
+                              alt={c.title}
+                              referrerPolicy="no-referrer"
+                              onError={c.onErr}
+                              className="h-full w-full object-cover"
+                            />
+                          )}
+                        </div>
+                        <div className="p-3 flex flex-col justify-between">
+                          <div>
+                            <p className={`font-serif text-xs font-bold ${p.inkClass}`}>{c.title}</p>
+                            <p className={`mt-1 text-[11px] ${p.mutedInkClass}`}>{c.desc}</p>
+                          </div>
+                          {lead.phone && (
+                            <p className={`mt-2 font-mono text-[10px] ${p.accentTextClass}`}>
+                              {lead.phone}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {preset.layout === 'search_grid_portal' && (
+                <div>
+                  <div className={`flex flex-wrap items-center gap-2 border-b bg-white px-5 py-3 text-xs ${p.borderClass}`}>
+                    <div className={`flex flex-1 items-center gap-2 rounded-md border px-3 py-1.5 ${p.surfaceClass} ${p.borderClass}`}>
+                      <MapPin className={`h-3.5 w-3.5 ${p.accentTextClass}`} />
+                      <span className={p.inkClass}>Location: {locationLabel}</span>
+                    </div>
+                    <div className={`hidden sm:flex items-center gap-2 rounded-md border px-3 py-1.5 ${p.surfaceClass} ${p.borderClass}`}>
+                      <span className={p.mutedInkClass}>Residential &amp; Estates</span>
+                    </div>
+                    <span className={`inline-flex items-center gap-1.5 rounded-md px-3.5 py-1.5 font-medium ${p.btnPrimaryClass}`}>
+                      <Search className="h-3 w-3" />
+                      <span>Browse</span>
+                    </span>
+                  </div>
+
+                  <div className="p-5 space-y-4">
+                    <div className="relative h-44 overflow-hidden rounded-xl bg-slate-900">
+                      {!heroError && (
+                        <img
+                          src={preset.heroImg}
+                          alt={`Property portal showcase for ${lead.business_name}`}
+                          referrerPolicy="no-referrer"
+                          onError={() => setHeroError(true)}
+                          className="h-full w-full object-cover"
+                        />
+                      )}
+                      <div className="absolute inset-0 bg-gradient-to-r from-slate-950/90 via-slate-950/55 to-transparent" />
+                      <div className="absolute inset-y-0 left-0 flex flex-col justify-center p-5 text-white max-w-md">
+                        <p className={`text-[11px] font-medium ${p.softAccentTextClass}`}>
+                          {copy.eyebrow}
+                        </p>
+                        <h4 className="mt-1 font-display text-lg font-semibold leading-snug">
+                          {copy.headline}
+                        </h4>
+                        <div className="mt-3">
+                          <span className={`inline-block rounded-md px-3 py-1.5 text-xs font-medium ${p.btnPrimaryClass}`}>
+                            {copy.secondaryCta}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      {[
+                        { img: preset.secondaryImg, title: copy.cardOneTitle, desc: copy.cardOneDesc },
+                        { img: preset.tertiaryImg, title: copy.cardTwoTitle, desc: copy.cardTwoDesc },
+                        { img: preset.heroImg, title: copy.cardThreeTitle, desc: copy.cardThreeDesc },
+                      ].map((c, idx) => (
+                        <div key={idx} className={`overflow-hidden rounded-lg border bg-white ${p.borderClass}`}>
+                          <div className="h-24 bg-slate-200">
+                            <img
+                              src={c.img}
+                              alt={c.title}
+                              referrerPolicy="no-referrer"
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                          <div className="p-2.5">
+                            <p className={`text-xs font-semibold ${p.inkClass}`}>{c.title}</p>
+                            <p className={`mt-0.5 text-[11px] ${p.mutedInkClass}`}>{c.desc}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {preset.layout === 'full_bleed_hero' && (
+                <>
+                  <div className="relative h-60 w-full overflow-hidden bg-slate-900">
+                    {!heroError ? (
+                      <img
+                        src={preset.heroImg}
+                        alt={`Nigerian residential property concept for ${lead.business_name}`}
+                        referrerPolicy="no-referrer"
+                        onError={() => setHeroError(true)}
+                        className="h-full w-full object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center bg-slate-800 text-slate-300">
+                        <Building2 className="h-10 w-10" />
+                      </div>
+                    )}
+                    <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/40 to-transparent" />
+                    <div className="absolute inset-x-0 bottom-0 p-6 text-white">
+                      <p className={`text-[11px] font-medium ${p.softAccentTextClass}`}>
+                        {copy.eyebrow}
+                      </p>
+                      <h4 className="mt-1 max-w-lg font-display text-xl font-semibold leading-snug">
+                        {copy.headline}
+                      </h4>
+                      <div className="mt-3 flex items-center gap-3">
+                        <span className={`rounded-md px-3.5 py-1.5 text-xs font-medium ${p.btnPrimaryClass}`}>
+                          {copy.primaryCta}
+                        </span>
+                        <span className="rounded-md border border-white/40 bg-white/10 px-3.5 py-1.5 text-xs font-medium text-white backdrop-blur-sm">
+                          {copy.secondaryCta}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
+                    <div className={`overflow-hidden rounded-lg border bg-white ${p.borderClass}`}>
+                      <div className="h-28 w-full bg-slate-200">
+                        {!secondaryError ? (
+                          <img
+                            src={preset.secondaryImg}
+                            alt={copy.cardOneTitle}
+                            referrerPolicy="no-referrer"
+                            onError={() => setSecondaryError(true)}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full items-center justify-center text-slate-400">
+                            <Building2 className="h-6 w-6" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="p-3">
+                        <p className={`text-xs font-semibold ${p.inkClass}`}>{copy.cardOneTitle}</p>
+                        <p className={`mt-0.5 text-[11px] ${p.mutedInkClass}`}>{copy.cardOneDesc}</p>
+                      </div>
+                    </div>
+
+                    <div className={`flex flex-col justify-between rounded-lg border bg-white p-4 ${p.borderClass}`}>
+                      <div>
+                        <p className={`text-xs font-semibold ${p.inkClass}`}>{copy.cardThreeTitle}</p>
+                        <p className={`mt-1 text-[11px] leading-relaxed ${p.mutedInkClass}`}>
+                          {copy.subheadline}
+                        </p>
+                      </div>
+                      <div className={`mt-3 flex flex-wrap items-center gap-3 text-[11px] ${p.mutedInkClass}`}>
+                        <span className="inline-flex items-center gap-1">
+                          <MapPin className={`h-3 w-3 ${p.accentTextClass}`} />
+                          {locationLabel}
+                        </span>
+                        {lead.phone && (
+                          <span className="inline-flex items-center gap-1 font-mono">
+                            <Phone className={`h-3 w-3 ${p.accentTextClass}`} />
+                            {lead.phone}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </div>
 
         {/* Mobile Portrait Frame */}
         <div className="lg:col-span-4 mx-auto w-full max-w-[270px] overflow-hidden rounded-2xl border-4 border-slate-800 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5">
-            <span className="truncate font-display text-xs font-bold text-slate-900">
+          <div
+            className={`flex items-center justify-between border-b px-4 py-2.5 ${
+              isDarkHeader || preset.layout === 'executive_sidebar'
+                ? `${p.bandBgClass} border-white/10 text-white`
+                : `${p.headerBgClass} ${p.borderClass} ${p.inkClass}`
+            }`}
+          >
+            <span className="truncate font-display text-xs font-bold">
               {lead.business_name}
             </span>
-            <span className="text-[10px] font-medium text-emerald-800">Menu</span>
+            <span
+              className={`text-[10px] font-medium ${
+                isDarkHeader || preset.layout === 'executive_sidebar'
+                  ? p.softAccentTextClass
+                  : p.accentTextClass
+              }`}
+            >
+              Menu
+            </span>
           </div>
-          <div className="relative h-44 bg-slate-900">
-            {!heroError ? (
-              <img
-                src={heroPropertyImg}
-                alt={`Mobile property preview for ${lead.business_name}`}
-                referrerPolicy="no-referrer"
-                onError={() => setHeroError(true)}
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center bg-slate-800 text-slate-300">
-                <Building2 className="h-8 w-8" />
+
+          {preset.layout === 'editorial_split' || preset.layout === 'minimal_framed' ? (
+            <div className={`p-3.5 space-y-3 ${p.surfaceClass}`}>
+              <div>
+                <p className={`text-[10px] font-semibold ${p.accentTextClass}`}>{locationLabel}</p>
+                <p className={`mt-0.5 font-serif text-sm font-bold leading-snug ${p.inkClass}`}>
+                  {copy.mobileHeadline}
+                </p>
               </div>
-            )}
-            <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/35 to-transparent" />
-            <div className="absolute inset-x-0 bottom-0 p-3.5 text-white">
-              <p className="text-[10px] text-emerald-300">{locationLabel}</p>
-              <p className="mt-0.5 font-display text-sm font-semibold leading-snug">
-                Trusted Real Estate in {lead.state}
-              </p>
+              <div className="h-32 overflow-hidden rounded-lg bg-slate-200">
+                {!heroError && (
+                  <img
+                    src={preset.heroImg}
+                    alt={`Mobile property preview for ${lead.business_name}`}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                )}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="relative h-44 bg-slate-900">
+              {!heroError ? (
+                <img
+                  src={preset.heroImg}
+                  alt={`Mobile property preview for ${lead.business_name}`}
+                  referrerPolicy="no-referrer"
+                  onError={() => setHeroError(true)}
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center bg-slate-800 text-slate-300">
+                  <Building2 className="h-8 w-8" />
+                </div>
+              )}
+              <div className="absolute inset-0 bg-gradient-to-t from-slate-950/90 via-slate-950/35 to-transparent" />
+              <div className="absolute inset-x-0 bottom-0 p-3.5 text-white">
+                <p className={`text-[10px] ${p.softAccentTextClass}`}>{locationLabel}</p>
+                <p className="mt-0.5 font-display text-sm font-semibold leading-snug">
+                  {copy.mobileHeadline}
+                </p>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-3 p-3.5">
-            <div className="rounded-md border border-slate-200 p-2.5">
-              <p className="text-[11px] font-semibold text-slate-900">Property Showcase</p>
-              <p className="mt-0.5 text-[10px] text-slate-500">
-                Clean mobile browsing for plots, terraces, and estates.
-              </p>
+            <div className={`rounded-md border p-2.5 ${p.borderClass}`}>
+              <p className={`text-[11px] font-semibold ${p.inkClass}`}>{copy.cardOneTitle}</p>
+              <p className={`mt-0.5 text-[10px] ${p.mutedInkClass}`}>{copy.cardOneDesc}</p>
             </div>
-            <div className="flex items-center justify-center gap-1.5 rounded-md bg-emerald-800 py-2 text-xs font-medium text-white">
+            <div className={`flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium ${p.btnPrimaryClass}`}>
               <MessageCircle className="h-3.5 w-3.5" />
               <span>Chat on WhatsApp</span>
             </div>
