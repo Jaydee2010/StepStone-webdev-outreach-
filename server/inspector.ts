@@ -330,8 +330,13 @@ export async function inspectWebsiteUrl(rawUrl: string): Promise<HttpInspectionR
 
   let lastReport: HttpInspectionReport | null = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const candidateUrl =
+      attempt === 2 && !/^https?:\/\/www\./i.test(normalized)
+        ? normalized.replace(/^(https?:\/\/)/i, '$1www.')
+        : normalized;
     try {
-      const report = await singleInspectionAttempt(normalized);
+      const report = await singleInspectionAttempt(candidateUrl);
+      report.requested_url = normalized;
       report.attempts = attempt;
       if (report.reachable || (report.http_status && report.http_status < 500)) {
         return report;

@@ -187,6 +187,7 @@ export interface RawDiscoveredCompany {
   corporate_email_domains?: string[];
   brand_email_handles?: string[];
   text_domain_hints?: string[];
+  alternate_names?: string[];
 }
 
 export async function discoverBusinessesWithSearch(params: {
@@ -545,9 +546,13 @@ export async function inspectAndQualifyBatch(
           state: raw.state,
           city: raw.city,
           phone: raw.phone,
+          instagram_url: instagramUrl,
+          facebook_url: facebookUrl,
+          discovery_notes: raw.discovery_notes,
           corporateEmailDomains: raw.corporate_email_domains,
           brandEmailHandles: raw.brand_email_handles,
           textDomainHints: raw.text_domain_hints,
+          alternateNames: raw.alternate_names,
         });
         if (probeMatch) {
           websiteUrl = probeMatch.websiteUrl;
@@ -559,6 +564,14 @@ export async function inspectAndQualifyBatch(
           }
           allSources = Array.from(new Set([...allSources, ...probeMatch.sourceUrls]));
           lookupNotes = [lookupNotes, probeMatch.factualNote].filter(Boolean).join(' ');
+        } else if (raw.corporate_email_domains && raw.corporate_email_domains.length > 0) {
+          websiteUrl = `https://${raw.corporate_email_domains[0]}`;
+          lookupNotes = [
+            lookupNotes,
+            `Corporate email domain ${websiteUrl} found in listing; inspecting domain availability via HTTP.`,
+          ]
+            .filter(Boolean)
+            .join(' ');
         } else {
           const hadEmailHints = Boolean(
             (raw.corporate_email_domains?.length ?? 0) +
@@ -748,9 +761,13 @@ export async function inspectAndQualifyCandidate(
       state: raw.state,
       city: raw.city,
       phone: raw.phone,
+      instagram_url: instagramUrl,
+      facebook_url: facebookUrl,
+      discovery_notes: raw.discovery_notes,
       corporateEmailDomains: raw.corporate_email_domains,
       brandEmailHandles: raw.brand_email_handles,
       textDomainHints: raw.text_domain_hints,
+      alternateNames: raw.alternate_names,
     });
     if (probeMatch) {
       websiteUrl = probeMatch.websiteUrl;
@@ -762,6 +779,14 @@ export async function inspectAndQualifyCandidate(
       }
       allSources = Array.from(new Set([...allSources, ...probeMatch.sourceUrls]));
       lookupNotes = [lookupNotes, probeMatch.factualNote].filter(Boolean).join(' ');
+    } else if (raw.corporate_email_domains && raw.corporate_email_domains.length > 0) {
+      websiteUrl = `https://${raw.corporate_email_domains[0]}`;
+      lookupNotes = [
+        lookupNotes,
+        `Corporate email domain ${websiteUrl} found in listing; inspecting domain availability via HTTP.`,
+      ]
+        .filter(Boolean)
+        .join(' ');
     } else {
       const hadEmailHints = Boolean(
         (raw.corporate_email_domains?.length ?? 0) +
@@ -908,6 +933,11 @@ export async function generateOutreachForLead(
   if (lead.skip || lead.opportunity_score <= 2) {
     throw new Error(
       `Outreach is blocked for "${lead.business_name}" because it is marked skip (score ${lead.opportunity_score}/5).`
+    );
+  }
+  if (lead.website_status === 'unknown') {
+    throw new Error(
+      `Outreach paused for "${lead.business_name}": website status is Unknown/Unverified${lead.website_url ? ` (${lead.website_url})` : ''}. Re-inspect or check in browser before sending a DM.`
     );
   }
 

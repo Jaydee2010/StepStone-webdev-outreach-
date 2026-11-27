@@ -1,7 +1,11 @@
 import type { HttpInspectionReport } from './inspector.ts';
 import { normalizeUrlInput } from './inspector.ts';
 import type { RawDiscoveredCompany } from './gemini.ts';
-import { extractEmailHintsFromHtml, extractTextDomainsFromSnippet } from './domainProbe.ts';
+import {
+  extractAlternateEntityNames,
+  extractEmailHintsFromHtml,
+  extractTextDomainsFromSnippet,
+} from './domainProbe.ts';
 import { ALL_STATES_OPTION, NIGERIAN_STATES, type WebsiteClassification } from '../src/types/stepstone.ts';
 
 const FINELIB_BASE = 'https://www.finelib.com';
@@ -293,6 +297,7 @@ function parseFinelibListingPage(
     corporate_email_domains: emailHints.corporateEmailDomains,
     brand_email_handles: emailHints.brandEmailHandles,
     text_domain_hints: textDomainHints,
+    alternate_names: extractAlternateEntityNames(description),
   };
 }
 
@@ -484,9 +489,9 @@ export function qualifyFromHttpEvidence(params: {
       website_status: 'unknown',
       inspection_evidence: `${httpReport.factual_summary}${probeDiscoveryNote}`,
       confidence: 'Low',
-      opportunity_score: 3,
-      qualification_reason: `Server returned HTTP ${httpReport.http_status ?? 'WAF'} access restriction; requires manual browser check before outreach.`,
-      skip: false,
+      opportunity_score: 2,
+      qualification_reason: `Active domain ${websiteUrl} returned HTTP ${httpReport.http_status ?? 'WAF'} firewall/bot restriction; open in browser to verify before outreach so you never pitch "no website" to a live site.`,
+      skip: true,
     };
   }
 

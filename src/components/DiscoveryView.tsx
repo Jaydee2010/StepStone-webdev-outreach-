@@ -41,7 +41,8 @@ interface DiscoveryViewProps {
     instagram_url: string;
   }) => Promise<void>;
   onReinspectLead: (id: string, websiteUrl?: string | null) => Promise<void>;
-  onGenerateOutreach: (id: string) => Promise<void>;
+  onReverifyUnverified?: () => Promise<void>;
+  onGenerateOutreach: (id: string) => Promise<boolean>;
   onUpdateLifecycle: (id: string, lifecycle: LeadLifecycleStatus) => Promise<void>;
   onDeleteLead: (id: string) => Promise<void>;
   onOpenOutreachTab: (id: string) => void;
@@ -84,6 +85,7 @@ export function DiscoveryView({
   onRunDiscovery,
   onManualInspect,
   onReinspectLead,
+  onReverifyUnverified,
   onGenerateOutreach,
   onUpdateLifecycle,
   onDeleteLead,
@@ -98,10 +100,23 @@ export function DiscoveryView({
   const [showManualForm, setShowManualForm] = useState(false);
   const [manualBusy, setManualBusy] = useState(false);
   const [reinspectingId, setReinspectingId] = useState<string | null>(null);
+  const [reverifyingAll, setReverifyingAll] = useState(false);
   const [generatingOutreachId, setGeneratingOutreachId] = useState<string | null>(null);
   const [overrideUrl, setOverrideUrl] = useState('');
   const [showModeAJson, setShowModeAJson] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const unverifiedCount = useMemo(
+    () =>
+      leads.filter(
+        (l) =>
+          !l.website_url &&
+          (l.website_status === 'no_website' ||
+            l.website_status === 'instagram_only' ||
+            l.website_status === 'social_only')
+      ).length,
+    [leads]
+  );
 
   const [manualForm, setManualForm] = useState({
     business_name: '',
@@ -257,6 +272,29 @@ export function DiscoveryView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onReverifyUnverified && unverifiedCount > 0 && (
+              <button
+                type="button"
+                disabled={reverifyingAll}
+                onClick={async () => {
+                  setReverifyingAll(true);
+                  try {
+                    await onReverifyUnverified();
+                  } finally {
+                    setReverifyingAll(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 disabled:opacity-50 whitespace-nowrap"
+                title="Re-check stored no-website/social-only leads for hidden company domains"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${reverifyingAll ? 'animate-spin' : ''}`} />
+                <span>
+                  {reverifyingAll
+                    ? 'Re-verifying...'
+                    : `Re-verify Unverified (${unverifiedCount})`}
+                </span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setShowManualForm((v) => !v)}
@@ -848,8 +886,10 @@ export function DiscoveryView({
                   onClick={async () => {
                     setGeneratingOutreachId(selectedLead.id);
                     try {
-                      await onGenerateOutreach(selectedLead.id);
-                      onOpenOutreachTab(selectedLead.id);
+                      const generated = await onGenerateOutreach(selectedLead.id);
+                      if (generated) {
+                        onOpenOutreachTab(selectedLead.id);
+                      }
                     } finally {
                       setGeneratingOutreachId(null);
                     }

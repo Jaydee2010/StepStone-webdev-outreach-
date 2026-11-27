@@ -29,6 +29,21 @@ export function buildPlaybookOutreachForLead(
       `Outreach is blocked for "${lead.business_name}" because it is marked skip (score ${lead.opportunity_score}/5).`
     );
   }
+  if (lead.website_status === 'unknown') {
+    throw new Error(
+      `Outreach paused for "${lead.business_name}": website status is Unknown/Unverified${lead.website_url ? ` (${lead.website_url})` : ''}. Re-inspect or check in browser before sending a DM.`
+    );
+  }
+  if (
+    lead.website_url &&
+    (lead.website_status === 'no_website' ||
+      lead.website_status === 'instagram_only' ||
+      lead.website_status === 'social_only')
+  ) {
+    throw new Error(
+      `Outreach paused for "${lead.business_name}": a website URL (${lead.website_url}) exists, so Re-inspect this lead first before drafting a message.`
+    );
+  }
 
   const angle = resolveAngle(lead);
   const locationLabel = lead.city ? `${lead.city}, ${lead.state}` : lead.state;

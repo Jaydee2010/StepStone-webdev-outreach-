@@ -269,7 +269,7 @@ export default function App() {
     }
   };
 
-  const handleGenerateOutreach = async (id: string) => {
+  const handleGenerateOutreach = async (id: string): Promise<boolean> => {
     setErrorBanner(null);
     setInfoNotice(null);
     try {
@@ -284,6 +284,21 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ lead: targetLead, packages, engineMode }),
       });
+
+      if (res.status === 409) {
+        const payload = (await res.json()) as { error?: string; updatedLead?: LeadRecord };
+        if (payload.updatedLead) {
+          setLeads((prev) =>
+            prev.map((l) => (l.id === id ? payload.updatedLead! : l))
+          );
+        }
+        setInfoNotice(
+          payload.error ||
+            'Pre-outreach verification discovered an existing website for this firm and updated the lead record.'
+        );
+        return false;
+      }
+
       const data = await parseApiResponse<{
         lead: LeadRecord;
         quotaNotice?: string | null;
@@ -306,8 +321,38 @@ export default function App() {
           }),
         });
       }
+      return true;
     } catch (err) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to generate outreach.');
+      return false;
+    }
+  };
+
+  const handleReverifyUnverified = async () => {
+    setErrorBanner(null);
+    setInfoNotice(null);
+    try {
+      const res = await fetch('/api/leads/reverify-unverified', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leads, engineMode }),
+      });
+      const data = await parseApiResponse<{
+        updatedLeads: LeadRecord[];
+        checkedCount: number;
+        discoveredCount: number;
+      }>(res);
+      if (data.updatedLeads.length > 0) {
+        const byId = new Map(data.updatedLeads.map((l) => [l.id, l]));
+        setLeads((prev) => prev.map((l) => byId.get(l.id) ?? l));
+      }
+      setInfoNotice(
+        data.checkedCount === 0
+          ? 'No unverified leads left to check.'
+          : `Re-verified ${data.checkedCount} previously unverified lead(s) and found ${data.discoveredCount} existing website(s).`
+      );
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to re-verify leads.');
     }
   };
 
@@ -692,6 +737,7 @@ export default function App() {
               onRunDiscovery={handleRunDiscovery}
               onManualInspect={handleManualInspect}
               onReinspectLead={handleReinspectLead}
+              onReverifyUnverified={handleReverifyUnverified}
               onGenerateOutreach={handleGenerateOutreach}
               onUpdateLifecycle={handleUpdateLifecycle}
               onDeleteLead={handleDeleteLead}

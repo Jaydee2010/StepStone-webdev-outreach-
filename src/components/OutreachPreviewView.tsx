@@ -17,7 +17,7 @@ interface OutreachPreviewViewProps {
   leads: LeadRecord[];
   selectedLeadId: string | null;
   onSelectLead: (id: string) => void;
-  onGenerateOutreach: (id: string) => Promise<void>;
+  onGenerateOutreach: (id: string) => Promise<boolean | void>;
   onUpdateLifecycle: (id: string, lifecycle: LeadLifecycleStatus) => Promise<void>;
   onUpdatePhone?: (id: string, phone: string | null) => Promise<void>;
   onChangeDesignVariant?: (id: string, variantId: string) => Promise<void>;

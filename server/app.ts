@@ -321,6 +321,90 @@ export function createApiRouter(): express.Router {
     }
   });
 
+  // Batch re-verify existing unverified leads (no_website / instagram_only / social_only without website_url)
+  router.post('/leads/reverify-unverified', async (req, res) => {
+    try {
+      const { leads: clientLeads, engineMode } = (req.body || {}) as {
+        leads?: LeadRecord[];
+        engineMode?: EngineMode;
+      };
+      const db = readDb();
+      const sourceLeads =
+        Array.isArray(clientLeads) && clientLeads.length > 0 ? clientLeads : db.leads;
+
+      const targets = sourceLeads
+        .filter(
+          (l) =>
+            !l.website_url &&
+            (l.website_status === 'no_website' ||
+              l.website_status === 'instagram_only' ||
+              l.website_status === 'social_only')
+        )
+        .slice(0, 15);
+
+      if (targets.length === 0) {
+        return res.json({ updatedLeads: [], checkedCount: 0, discoveredCount: 0 });
+      }
+
+      const mode = normalizeEngineMode(engineMode);
+      const inspectMode: EngineMode = mode === 'ai' ? 'ai' : 'free';
+
+      const rechecked = await inspectAndQualifyBatch(
+        targets.map((existing) => ({
+          business_name: existing.business_name,
+          business_category: existing.business_category,
+          state: existing.state,
+          city: existing.city,
+          phone: existing.phone,
+          website_url: existing.website_url,
+          instagram_url: existing.instagram_url,
+          facebook_url: existing.facebook_url,
+          google_business_profile_url: existing.google_business_profile_url,
+          source_urls: existing.source_urls,
+          discovery_notes: existing.inspection_evidence,
+        })),
+        inspectMode
+      );
+
+      let discoveredCount = 0;
+      const updatedLeads: LeadRecord[] = targets.map((existing, i) => {
+        const verified = rechecked[i];
+        if (!verified) return existing;
+        const foundSite = Boolean(verified.website_url);
+        if (foundSite) discoveredCount++;
+        const statusChanged = verified.website_status !== existing.website_status;
+
+        const merged: LeadRecord = {
+          ...verified,
+          id: existing.id,
+          discovered_at: existing.discovered_at,
+          search_state: existing.search_state,
+          lead_lifecycle: existing.lead_lifecycle,
+          mockup_variant_id: existing.mockup_variant_id ?? null,
+          outreach: verified.skip || statusChanged ? null : existing.outreach,
+        };
+
+        const dbIdx = db.leads.findIndex((l) => l.id === existing.id);
+        if (dbIdx !== -1) {
+          db.leads[dbIdx] = merged;
+        } else {
+          db.leads = [merged, ...db.leads];
+        }
+        return merged;
+      });
+
+      writeDb(db);
+      res.json({
+        updatedLeads,
+        checkedCount: targets.length,
+        discoveredCount,
+      });
+    } catch (err) {
+      const apiErr = extractApiError(err);
+      res.status(apiErr.status).json({ error: apiErr.message });
+    }
+  });
+
   // Mode B: Generate outreach & homepage preview brief for a qualified lead
   router.post('/leads/:id/outreach', async (req, res) => {
     try {
@@ -332,30 +416,84 @@ export function createApiRouter(): express.Router {
       };
       const db = readDb();
       const idx = db.leads.findIndex((l) => l.id === id);
-      const lead = idx !== -1 ? db.leads[idx] : clientLead;
-      if (!lead) {
+      const storedLead = idx !== -1 ? db.leads[idx] : clientLead;
+      if (!storedLead) {
         return res.status(404).json({ error: 'Lead not found.' });
       }
-      if (lead.skip || lead.opportunity_score <= 2) {
+      if (storedLead.skip || storedLead.opportunity_score <= 2) {
         return res.status(400).json({
           error:
             'Outreach cannot be generated for skipped businesses (opportunity score 1 or 2).',
         });
       }
 
+      const mode = normalizeEngineMode(engineMode);
+      let lead = storedLead;
+      let verificationNotice: string | null = null;
+
+      // Pre-outreach safeguard: always re-verify unverified leads before drafting a no-website DM
+      if (
+        !lead.website_url &&
+        (lead.website_status === 'no_website' ||
+          lead.website_status === 'instagram_only' ||
+          lead.website_status === 'social_only')
+      ) {
+        const rechecked = await inspectAndQualifyCandidate(
+          {
+            business_name: lead.business_name,
+            business_category: lead.business_category,
+            state: lead.state,
+            city: lead.city,
+            phone: lead.phone,
+            website_url: lead.website_url,
+            instagram_url: lead.instagram_url,
+            facebook_url: lead.facebook_url,
+            google_business_profile_url: lead.google_business_profile_url,
+            source_urls: lead.source_urls,
+            discovery_notes: lead.inspection_evidence,
+          },
+          mode === 'ai',
+          mode === 'ai' ? 'ai' : 'free'
+        );
+
+        lead = {
+          ...rechecked,
+          id: storedLead.id,
+          discovered_at: storedLead.discovered_at,
+          search_state: storedLead.search_state,
+          lead_lifecycle: storedLead.lead_lifecycle,
+          mockup_variant_id: storedLead.mockup_variant_id ?? null,
+          outreach: rechecked.skip ? null : storedLead.outreach,
+        };
+
+        if (idx !== -1) {
+          db.leads[idx] = lead;
+        } else {
+          db.leads = [lead, ...db.leads];
+        }
+        writeDb(db);
+
+        if (lead.website_url) {
+          if (lead.skip || lead.opportunity_score <= 2 || lead.website_status === 'unknown') {
+            return res.status(409).json({
+              error: `Pre-outreach check found an existing website (${lead.website_url} — ${lead.website_status.replace('_', ' ')}). Outreach stopped and the lead record was updated so you don't send a false "no website" DM.`,
+              updatedLead: lead,
+            });
+          }
+          verificationNotice = `Pre-outreach verification found ${lead.website_url} (${lead.website_status.replace('_', ' ')}) and tailored the DM accurately instead of pitching "no website".`;
+        }
+      }
+
       const activePackages = clientPackages ?? db.packages;
-      const result = await generateOutreachForLead(
-        lead,
-        activePackages,
-        normalizeEngineMode(engineMode)
-      );
+      const result = await generateOutreachForLead(lead, activePackages, mode);
       const updatedLead: LeadRecord = {
         ...lead,
         outreach: result.outreach,
         lead_lifecycle: lead.lead_lifecycle === 'new' ? 'outreach_ready' : lead.lead_lifecycle,
       };
-      if (idx !== -1) {
-        db.leads[idx] = updatedLead;
+      const saveIdx = db.leads.findIndex((l) => l.id === id);
+      if (saveIdx !== -1) {
+        db.leads[saveIdx] = updatedLead;
       } else {
         db.leads = [updatedLead, ...db.leads];
       }
@@ -364,7 +502,7 @@ export function createApiRouter(): express.Router {
         lead: updatedLead,
         outreach: result.outreach,
         engineUsed: result.engineUsed,
-        quotaNotice: result.quotaNotice,
+        quotaNotice: verificationNotice ?? result.quotaNotice,
       });
     } catch (err) {
       const apiErr = extractApiError(err);
